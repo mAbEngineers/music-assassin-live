@@ -6,7 +6,7 @@
   "sample_rate": 48000,
   "frame": 480,
   "domain": "time",
-  "license": "verify before public release (yuyun2000/SpeechDenoiser)",
+  "license": "UNRESOLVED (verified 2026-07-04): yuyun2000/SpeechDenoiser repo declares NO license. Per its README the 48k model is a DeepFilterNet3 re-export (upstream is MIT/Apache-2.0 dual), but the export itself carries no grant. Do NOT redistribute as a release asset until resolved — options: ask upstream to add a license, or re-export DFN3 from the dual-licensed source.",
   "source": "https://github.com/yuyun2000/SpeechDenoiser (48k/denoiser_model.onnx)",
   "benchmarks": {
     "machine": "yoake-pad CPU, 2026-07-02",

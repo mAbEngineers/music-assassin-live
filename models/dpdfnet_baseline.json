@@ -7,8 +7,8 @@
   "n_fft": 320,
   "hop": 160,
   "window": "vorbis",
-  "license": "verify before public release (DeepFilterNet lineage: MIT/Apache-2.0 dual)",
-  "source": "sherpa-onnx speech-enhancement models release",
+  "license": "Apache-2.0 (Ceva-IP/DPDFNet — verified 2026-07-04 on GitHub repo and HF model tag, OK to redistribute with license text and attribution)",
+  "source": "https://huggingface.co/Ceva-IP/DPDFNet (via k2-fsa/sherpa-onnx speech-enhancement-models release; NOT DeepFilterNet lineage — Ceva's own architecture)",
   "benchmarks": {
     "machine": "yoake-pad CPU, 2026-07-02",
     "ms_per_20ms_block": 2.76,

@@ -7,7 +7,7 @@
   "n_fft": 512,
   "hop": 256,
   "window": "hann_sqrt",
-  "license": "MIT (Xiaobin-Rong/gtcrn — verify before public release)",
+  "license": "MIT (Xiaobin-Rong/gtcrn — verified 2026-07-04, OK to redistribute with license text)",
   "source": "https://github.com/Xiaobin-Rong/gtcrn (k2-fsa streaming export)",
   "benchmarks": {
     "machine": "yoake-pad CPU, 2026-07-02",
