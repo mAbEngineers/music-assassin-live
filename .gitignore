@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# model weights are release assets, never committed
+models/*.onnx
+
+build/
+dist/
+*.spec

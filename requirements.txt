@@ -1,0 +1,9 @@
+# Deliberately tiny — the app must never depend on torch.
+# Whole stack ≈ 100 MB. See docs/ARCHITECTURE.md §1.
+numpy
+sounddevice
+soxr
+onnxruntime
+
+# optional speed-up on Intel/AMD (adds ~180 MB):
+# onnxruntime-openvino

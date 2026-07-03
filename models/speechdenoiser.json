@@ -1,0 +1,18 @@
+{
+  "name": "speechdenoiser",
+  "file": "speechdenoiser.onnx",
+  "runtime": "onnxruntime",
+  "type": "speech-enhancement",
+  "sample_rate": 48000,
+  "frame": 480,
+  "domain": "time",
+  "license": "verify before public release (yuyun2000/SpeechDenoiser)",
+  "source": "https://github.com/yuyun2000/SpeechDenoiser (48k/denoiser_model.onnx)",
+  "benchmarks": {
+    "machine": "yoake-pad CPU, 2026-07-02",
+    "ms_per_20ms_block": 5.15,
+    "rtf": 0.258,
+    "algorithmic_latency_ms": 10.0
+  },
+  "notes": "48 kHz native — zero-resampling path in the live engine. Heaviest per frame but still 4x realtime headroom on the dev machine."
+}

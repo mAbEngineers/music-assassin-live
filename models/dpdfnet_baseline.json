@@ -1,0 +1,19 @@
+{
+  "name": "dpdfnet",
+  "file": "dpdfnet_baseline.onnx",
+  "runtime": "onnxruntime",
+  "type": "speech-enhancement",
+  "sample_rate": 16000,
+  "n_fft": 320,
+  "hop": 160,
+  "window": "vorbis",
+  "license": "verify before public release (DeepFilterNet lineage: MIT/Apache-2.0 dual)",
+  "source": "sherpa-onnx speech-enhancement models release",
+  "benchmarks": {
+    "machine": "yoake-pad CPU, 2026-07-02",
+    "ms_per_20ms_block": 2.76,
+    "rtf": 0.138,
+    "algorithmic_latency_ms": 10.0
+  },
+  "notes": "EXPERIMENTAL: state initialized to zeros instead of the export's erb/spec norm-init values; feature normalization adapts over the first ~1 s after reset."
+}
