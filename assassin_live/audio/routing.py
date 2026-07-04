@@ -33,12 +33,28 @@ def _run(cmd: list[str]) -> str:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
 
 
-def _pw_dump_nodes() -> list[dict]:
+def _pw_dump(type_suffix: str) -> list[dict]:
+    # pw-dump emits one JSON array per graph snapshot; if the graph changes
+    # mid-dump it appends further arrays, so parse them all.
     try:
-        objs = json.loads(_run(["pw-dump"]))
-    except (json.JSONDecodeError, subprocess.SubprocessError):
+        text = _run(["pw-dump"])
+    except subprocess.SubprocessError:
         return []
-    return [o for o in objs if o.get("type") == "PipeWire:Interface:Node"]
+    objs, dec, pos = [], json.JSONDecoder(), 0
+    while pos < len(text):
+        try:
+            chunk, end = dec.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            break
+        objs.extend(chunk)
+        pos = end
+        while pos < len(text) and text[pos] in " \t\r\n":
+            pos += 1
+    return [o for o in objs if o.get("type", "").endswith(type_suffix)]
+
+
+def _pw_dump_nodes() -> list[dict]:
+    return _pw_dump(":Node")
 
 
 def list_sinks() -> list[SinkInfo]:
@@ -90,6 +106,56 @@ def create_trap_sink(timeout_s: float = 3.0) -> SinkInfo:
             return found[0]
         time.sleep(0.1)
     raise RuntimeError("trap sink did not appear in the PipeWire graph")
+
+
+def pin_process_streams(pid: int, capture_sink: str, playback_sink: str,
+                        timeout_s: float = 3.0) -> bool:
+    """Point this process's audio streams at explicit sinks.
+
+    PortAudio's "pulse" device usually resolves to the PipeWire ALSA plugin
+    (pipewire-alsa, the Ubuntu 24.04 default), which ignores
+    PULSE_SOURCE/PULSE_SINK — freshly opened streams then follow WirePlumber
+    defaults: playback lands on the default sink (the trap — a feedback
+    loop) and capture on whatever default source exists. Fix: find our own
+    stream nodes (via the client object carrying our pid) and set
+    target.object metadata. WirePlumber moves the streams; a capture stream
+    targeted at a sink is linked to that sink's monitor ports.
+
+    capture_sink/playback_sink are sink node names; the capture stream is
+    attached to capture_sink's monitor.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        serials = {}
+        for node in _pw_dump_nodes():
+            props = node.get("info", {}).get("props", {})
+            if props.get("node.name") in (capture_sink, playback_sink):
+                serials[props["node.name"]] = props.get("object.serial")
+        our_clients = {
+            o["id"] for o in _pw_dump(":Client")
+            if o.get("info", {}).get("props", {}).get("pipewire.sec.pid") == pid
+        }
+        cap_node = play_node = None
+        for node in _pw_dump_nodes():
+            props = node.get("info", {}).get("props", {})
+            if props.get("client.id") not in our_clients:
+                continue
+            if props.get("media.class") == "Stream/Input/Audio":
+                cap_node = node["id"]
+            elif props.get("media.class") == "Stream/Output/Audio":
+                play_node = node["id"]
+        if (cap_node and play_node
+                and serials.get(capture_sink) is not None
+                and serials.get(playback_sink) is not None):
+            for node_id, sink in ((cap_node, capture_sink),
+                                  (play_node, playback_sink)):
+                subprocess.run(
+                    ["pw-metadata", str(node_id), "target.object",
+                     str(serials[sink])],
+                    capture_output=True, timeout=10)
+            return True
+        time.sleep(0.1)
+    return False
 
 
 class RoutingSession:

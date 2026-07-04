@@ -1,11 +1,16 @@
 """Layer 2 — streaming engine.
 
 One duplex PortAudio stream: capture = trap sink monitor, playback = real
-hardware sink (both selected via PULSE_SOURCE / PULSE_SINK on the "pulse"
-device — works against pipewire-pulse). The audio callback only moves blocks
-between ring buffers; inference runs on a worker thread. If the worker falls
-behind, the callback emits the dry signal instead of glitching, and the
-wet/dry mix is always ramped (20 ms) so toggling never clicks.
+hardware sink. Targeting is two-layered: PULSE_SOURCE / PULSE_SINK env vars
+cover the case where PortAudio's "pulse" device reaches pipewire-pulse, but
+on Ubuntu 24.04 that device resolves to the PipeWire ALSA plugin which
+ignores them — so after the stream starts, routing.pin_process_streams()
+moves our stream nodes to the right targets with PipeWire metadata.
+
+The audio callback only moves blocks between ring buffers; inference runs on
+a worker thread. If the worker falls behind, the callback emits the dry
+signal instead of glitching, and the wet/dry mix is always ramped (20 ms) so
+toggling never clicks.
 """
 
 import os
@@ -94,6 +99,12 @@ class AudioEngine:
             device=(dev, dev), samplerate=SAMPLE_RATE, blocksize=BLOCK,
             channels=2, dtype="float32", callback=self._callback)
         self._stream.start()
+
+        from .routing import pin_process_streams
+        capture_sink = monitor_source.removesuffix(".monitor")
+        if not pin_process_streams(os.getpid(), capture_sink, sink_name):
+            print("warning: could not pin audio streams to their targets; "
+                  "routing may be wrong (check pw-link -l)")
 
     def stop(self) -> None:
         self._running = False

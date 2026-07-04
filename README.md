@@ -59,10 +59,14 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 | speechdenoiser | speechdenoiser.onnx | 48 kHz | no resampling path |
 | dpdfnet | dpdfnet_baseline.onnx | 16 kHz | experimental (see module docstring) |
 
-All are speech-enhancement models: output is voice-only (music removed, but
-non-speech SFX are attenuated too). A true music-vs-SFX realtime model drops
-in with zero app changes once one exists — that's the point of the
-processor interface.
+All are speech-enhancement models. Measured behavior (live e2e, 2026-07-04):
+noise and noise-like backgrounds are strongly removed (−29 to −63 dB on
+white noise), but prominent or vocal-heavy music largely passes through
+(−0.4 to −1.7 dB on a music+dialogue mix — the models read it as speech).
+The research repo's own DeepFilterNet diagnostics show the same (−0.6 to
+−8 dB per segment). True music removal needs a realtime source-separation
+model — an open research-repo problem; it drops in here with zero app
+changes via the processor interface.
 
 ## Status
 
@@ -70,7 +74,8 @@ processor interface.
 - [x] Layer 2 — streaming engine (dry-fallback, click-free toggle)
 - [x] Layer 3 — GTCRN / DPDFNet / SpeechDenoiser processors (offline-tested)
 - [x] Layer 4 — minimal toggle GUI + headless mode
-- [ ] Live end-to-end validation on real playback
+- [x] Live end-to-end validation on real playback (BT sink; injected noise
+      removed from output, speech passes, clean sink restore on exit)
 - [ ] Tray icon, autostart, first-run model download
 - [ ] PyInstaller → AppImage packaging
 - [ ] Native LADSPA port (see docs/ARCHITECTURE.md Phase 3)
