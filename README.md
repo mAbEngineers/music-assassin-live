@@ -45,6 +45,14 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python tests/test_processors_offline.py
 .venv/bin/python tests/test_routing_dry.py
 
+# repeatable quality + plumbing regression check — rerun this any time
+# import_models.py pulls updated weights from the research repo; it diffs
+# the numbers against the previous run so a model change shows up as a
+# number moving. Works with no audio hardware connected (falls back to
+# PipeWire's dummy sink for the plumbing tier, clearly marked as skipped);
+# add real headphones/speakers to also validate the live audio path.
+.venv/bin/python tests/test_live_e2e.py
+
 # run
 .venv/bin/python -m assassin_live               # GUI toggle window
 .venv/bin/python -m assassin_live --headless    # terminal mode, Ctrl-C stops

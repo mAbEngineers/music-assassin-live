@@ -12,6 +12,11 @@ _MODEL_FILES = {
 }
 
 
+def model_file(name: str) -> str | None:
+    """Filename for a processor's ONNX weights, or None for passthrough."""
+    return _MODEL_FILES.get(name)
+
+
 def available(models_dir: Path) -> list[str]:
     names = ["passthrough"]
     names += [n for n, f in _MODEL_FILES.items() if (models_dir / f).is_file()]
