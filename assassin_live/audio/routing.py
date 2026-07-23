@@ -166,10 +166,19 @@ class RoutingSession:
     stole it, and reports when the real output sink changed or vanished.
     """
 
+    # a candidate replacement sink must be observed as the system default
+    # for this long, continuously, before we act on it — otherwise a
+    # flapping device (BT reconnect loop, a race with WirePlumber's own
+    # default-sink assignment) triggers a full engine restart on every
+    # tick, and each restart is an audible glitch.
+    RETARGET_DEBOUNCE_S = 1.5
+
     def __init__(self):
         self.trap: SinkInfo | None = None
         self.real: SinkInfo | None = None
         self.preferred_name: str | None = None  # user-picked output sink, if any
+        self._pending: SinkInfo | None = None
+        self._pending_since: float = 0.0
 
     def _pick_real(self, fallback: SinkInfo | None) -> SinkInfo | None:
         if self.preferred_name:
@@ -207,6 +216,8 @@ class RoutingSession:
         self.trap = create_trap_sink()
         self.real = prev or next(
             (s for s in list_sinks() if s.name != SINK_NAME), None)
+        self._pending = None
+        self._pending_since = 0.0
         set_default(self.trap.id)
         return self.real
 
@@ -228,17 +239,25 @@ class RoutingSession:
             return None
         default = get_default_sink()
         if default is None or default.name != SINK_NAME:
-            # BT reconnect etc. stole the default — grab the new device as our
-            # output, then re-assert the trap.
-            if default is not None:
-                changed = self.real is None or default.name != self.real.name
-                self.real = default
+            # Something (BT reconnect, a system output picker, WirePlumber's
+            # own default-sink logic) stole the default — always re-assert
+            # the trap immediately so the filter never sits bypassed, but
+            # only report a real device change (and trigger an engine
+            # restart) once the candidate has held steady for a bit.
+            if default is None:
                 set_default(self.trap.id)
-                if changed:
-                    return "real_sink_changed"
+                return None
+            if self._pending is None or default.name != self._pending.name:
+                self._pending = default
+                self._pending_since = time.monotonic()
             set_default(self.trap.id)
+            stable = time.monotonic() - self._pending_since >= self.RETARGET_DEBOUNCE_S
+            if stable and (self.real is None or default.name != self.real.name):
+                self.real = default
+                return "real_sink_changed"
             return None
         # default is still us; make sure our output device still exists
+        self._pending = None
         if self.real and not any(s.name == self.real.name for s in list_sinks()):
             self.real = next(
                 (s for s in list_sinks() if s.name != SINK_NAME), None)

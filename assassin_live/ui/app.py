@@ -312,8 +312,16 @@ class App:
         if self.enabled and self.engine:
             event = self.routing.check()
             if event == "real_sink_changed" and self.routing.real:
-                self.engine.retarget(self.routing.monitor_source,
-                                     self.routing.real.name)
+                try:
+                    self.engine.retarget(self.routing.monitor_source,
+                                         self.routing.real.name)
+                except Exception as e:  # noqa: BLE001 — a broken stream must not
+                    # wedge the app; drop back to a clean, known-off state
+                    # instead of leaving the trap sink stuck as default with
+                    # no audio flowing.
+                    self._turn_off()
+                    self.status.config(text=f"retarget failed, turned off: {e}")
+                    return
             elif event == "real_sink_lost":
                 self._turn_off()
                 self.status.config(text="output device lost — turned off")

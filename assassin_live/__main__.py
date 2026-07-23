@@ -57,7 +57,13 @@ def main():
             time.sleep(1)
             event = routing.check()
             if event == "real_sink_changed" and routing.real:
-                engine.retarget(routing.monitor_source, routing.real.name)
+                try:
+                    engine.retarget(routing.monitor_source, routing.real.name)
+                except Exception as e:  # noqa: BLE001 — don't limp along on a
+                    # broken stream; stop cleanly (finally below restores
+                    # the sink) rather than leaving state half-broken.
+                    print(f"\nretarget failed, stopping: {e}")
+                    break
             elif event == "real_sink_lost":
                 print("output device lost, waiting...")
             s = engine.stats

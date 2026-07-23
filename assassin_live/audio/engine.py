@@ -170,6 +170,12 @@ class AudioEngine:
         if self._worker:
             self._worker.join(timeout=2)
             self._worker = None
+        # drop any blocks the worker didn't get to — without this, a
+        # restart replays up to maxsize blocks (160 ms) of stale pre-stop
+        # audio through the freshly-reset processor before catching up to
+        # live audio, an audible glitch right after every retarget.
+        with self._in_q.mutex:
+            self._in_q.queue.clear()
         with self._lock:
             self._out = np.zeros(0, dtype=np.float32)
         self._wet_gain = 0.0
