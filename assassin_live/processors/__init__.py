@@ -8,6 +8,7 @@ from .passthrough import Passthrough
 _MODEL_FILES = {
     "gtcrn": "gtcrn_simple.onnx",
     "dpdfnet": "dpdfnet_baseline.onnx",
+    "dpdfnet_hr": "dpdfnet2_48khz_hr.onnx",
     "speechdenoiser": "speechdenoiser.onnx",
 }
 
@@ -39,5 +40,8 @@ def create(name: str, models_dir: Path) -> StreamProcessor:
     if name == "dpdfnet":
         from .dpdfnet import DpdfnetProcessor
         return DpdfnetProcessor(str(path))
+    if name == "dpdfnet_hr":
+        from .dpdfnet import Dpdfnet48kProcessor
+        return Dpdfnet48kProcessor(str(path))
     from .speechdenoiser import SpeechDenoiserProcessor
     return SpeechDenoiserProcessor(str(path))

@@ -66,6 +66,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 | gtcrn | gtcrn_simple.onnx (2 MB) | 16 kHz | default; lightest |
 | speechdenoiser | speechdenoiser.onnx | 48 kHz | no resampling path |
 | dpdfnet | dpdfnet_baseline.onnx | 16 kHz | experimental (see module docstring) |
+| dpdfnet_hr | dpdfnet2_48khz_hr.onnx | 48 kHz | same family as dpdfnet, no resampling path; quality vs. baseline not yet judged by ear |
 
 All are speech-enhancement models. Measured behavior (live e2e, 2026-07-04):
 noise and noise-like backgrounds are strongly removed (−29 to −63 dB on

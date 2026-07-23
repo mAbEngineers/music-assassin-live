@@ -1,0 +1,19 @@
+{
+  "name": "dpdfnet_hr",
+  "file": "dpdfnet2_48khz_hr.onnx",
+  "runtime": "onnxruntime",
+  "type": "speech-enhancement",
+  "sample_rate": 48000,
+  "n_fft": 960,
+  "hop": 480,
+  "window": "vorbis",
+  "license": "Apache-2.0 (Ceva-IP/DPDFNet — verified 2026-07-24 on HF model tag, same collection as dpdfnet_baseline; OK to redistribute with license text and attribution)",
+  "source": "https://huggingface.co/Ceva-IP/DPDFNet (profile dpdfnet2_48khz_hr, via k2-fsa/sherpa-onnx speech-enhancement-models release)",
+  "benchmarks": {
+    "machine": "yoake-pad CPU, 2026-07-24",
+    "ms_per_20ms_block": 7.19,
+    "rtf": 0.36,
+    "algorithmic_latency_ms": 10.0
+  },
+  "notes": "Native 48 kHz — same architecture family as dpdfnet_baseline but no resample round-trip either side, so it keeps the full band the 16 kHz baseline discards above 8 kHz. Same zeros-init caveat as dpdfnet_baseline (see its model card): feature normalization adapts over the first ~1 s after reset(). Quality vs the baseline and vs DeepFilterNet not yet judged by ear."
+}
