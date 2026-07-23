@@ -31,6 +31,11 @@ class SpeechDenoiserProcessor(StreamProcessor):
         self.state = np.zeros(45304, dtype=np.float32)
         self._pending = np.zeros(0, dtype=np.float32)
 
+    def set_atten_limit(self, db: float) -> None:
+        """Cap how many dB the model may attenuate a bin by; 0 = unlimited
+        (the model's own default — can suppress a bin to silence)."""
+        self._atten = np.array([db], dtype=np.float32)
+
     def feed(self, x: np.ndarray) -> np.ndarray:
         self._pending = np.concatenate([self._pending, x.astype(np.float32)])
         out = []

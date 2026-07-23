@@ -16,6 +16,8 @@ def main():
                     help="route audio but skip processing (plumbing test)")
     ap.add_argument("--midside", action="store_true",
                     help="enable the mid/side stereo pre-filter ahead of the model")
+    ap.add_argument("--no-bandlimit", action="store_true",
+                    help="disable the ~20 Hz-20 kHz band-limit on the processed output (on by default)")
     ap.add_argument("--list-models", action="store_true")
     ap.add_argument("--recover", action="store_true",
                     help="clean up stale trap sinks and restore default sink")
@@ -50,6 +52,7 @@ def main():
     engine = AudioEngine(proc)
     engine.set_bypass(args.bypass)
     engine.set_midside(args.midside)
+    engine.set_bandlimit(not args.no_bandlimit)
     engine.start(routing.monitor_source, real.name)
     print(f"filtering -> {real.name}  (model: {proc.name}, Ctrl-C to stop)")
     try:

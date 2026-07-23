@@ -22,6 +22,7 @@ import time
 import numpy as np
 
 from ..processors.base import StreamProcessor
+from .bandlimit import BandlimitFilter
 from .midside import MidSideFilter
 
 SAMPLE_RATE = 48000
@@ -72,6 +73,9 @@ class AudioEngine:
         self._levels: collections.deque = collections.deque(maxlen=64)
         self._midside = MidSideFilter()
         self._midside_enabled = False
+        self._bandlimit = BandlimitFilter(SAMPLE_RATE)
+        self._bandlimit_enabled = True  # safety hygiene filter — on by default
+        self._atten_limit_db = 0.0  # forwarded to the processor if it supports one
 
         # (processor, downsampler, upsampler) swapped as one unit so the
         # worker thread never reads a processor paired with the wrong
@@ -103,6 +107,18 @@ class AudioEngine:
     def set_processor(self, processor: StreamProcessor) -> None:
         """Hot-swap the model/pipeline while the stream keeps running."""
         self._runtime = self._build_runtime(processor)
+        self._apply_atten_limit()
+
+    def set_atten_limit(self, db: float) -> None:
+        """Suppression-strength ceiling, for processors that expose one
+        (currently only speechdenoiser); a no-op on ones that don't."""
+        self._atten_limit_db = db
+        self._apply_atten_limit()
+
+    def _apply_atten_limit(self) -> None:
+        setter = getattr(self.proc, "set_atten_limit", None)
+        if setter:
+            setter(self._atten_limit_db)
 
     def recent_levels(self) -> list:
         """Copy of the most recent output RMS levels, oldest first — for a
@@ -122,6 +138,13 @@ class AudioEngine:
         panning instead of spectral guessing. Off by default — stacks
         with whichever pipeline model is selected."""
         self._midside_enabled = enabled
+
+    def set_bandlimit(self, enabled: bool) -> None:
+        """Toggle the ~20 Hz-20 kHz band-limit (see audio/bandlimit.py) on
+        the processed output — removes content outside human hearing.
+        On by default; adds no algorithmic latency (a cheap IIR filter,
+        not the buffered WOLA framing the models use)."""
+        self._bandlimit_enabled = enabled
 
     def set_volumes(self, dry: float | None = None, wet: float | None = None,
                      mute_dry: bool | None = None, mute_wet: bool | None = None) -> None:
@@ -144,6 +167,7 @@ class AudioEngine:
 
         self.proc.reset()
         self._midside.reset()
+        self._bandlimit.reset()
         self._levels.clear()
         self._running = True
         self._worker = threading.Thread(target=self._work, daemon=True)
@@ -239,6 +263,8 @@ class AudioEngine:
             y = proc.feed(x)
             if up is not None and len(y):
                 y = up.resample_chunk(y)
+            if len(y) and self._bandlimit_enabled:
+                y = self._bandlimit.process(y)
             ms = (time.perf_counter() - t0) * 1000.0
             self.stats.worker_ms_avg = 0.9 * self.stats.worker_ms_avg + 0.1 * ms
             if len(y) == 0:

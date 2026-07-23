@@ -16,7 +16,7 @@ from ..audio.engine import AudioEngine
 from ..audio.routing import RoutingSession, list_sinks, SINK_NAME
 from ..paths import models_dir
 from .. import processors
-from .widgets import VSlider
+from .widgets import HSlider
 
 BG = "#0d0d10"
 PANEL = "#17171c"
@@ -40,6 +40,8 @@ class App:
         self.mute_wet = False
         self.mix_pct = 100.0
         self.midside_enabled = False
+        self.bandlimit_enabled = True
+        self.atten_db = 0.0
         self.output_map: dict[str, str] = {}
 
         self.root = tk.Tk()
@@ -53,8 +55,11 @@ class App:
         self._build_header()
         self._build_pickers()
         self._build_midside_toggle()
+        self._build_bandlimit_toggle()
+        self._build_atten_slider()
         self._build_waveform()
         self._build_sliders()
+        self._update_atten_visibility()
 
         self.status = tk.Label(self.root, text="idle", justify=tk.LEFT,
                                font=("Mono", 9), bg=BG, fg=SUBTEXT)
@@ -138,44 +143,77 @@ class App:
             cursor="hand2", command=self._toggle_midside)
         self.midside_btn.pack(fill=tk.X)
 
+    def _build_bandlimit_toggle(self):
+        row = tk.Frame(self.root, bg=BG)
+        row.pack(fill=tk.X, padx=20, pady=(0, 14))
+        self.bandlimit_btn = tk.Button(
+            row, text="Band-Limit (20 Hz-20 kHz): ON", font=("Sans", 9, "bold"),
+            fg=TEXT, bg=RED, activebackground=RED, activeforeground=TEXT,
+            bd=0, relief=tk.FLAT, highlightthickness=0, padx=10, pady=8,
+            cursor="hand2", command=self._toggle_bandlimit)
+        self.bandlimit_btn.pack(fill=tk.X)
+
+    def _build_atten_slider(self):
+        # only meaningful for speechdenoiser (its ONNX model takes an
+        # atten_lim_db input); shown/hidden by _update_atten_visibility()
+        # based on the selected pipeline. A slim single row, matching the
+        # Mid/Side toggle's proportions — this is a secondary, occasional
+        # control, not a primary fader like the mix below.
+        self.atten_card = tk.Frame(self.root, bg=PANEL)
+        row = tk.Frame(self.atten_card, bg=PANEL)
+        row.pack(fill=tk.X, padx=14, pady=10)
+        tk.Label(row, text="Suppression Limit", font=("Sans", 9, "bold"),
+                 bg=PANEL, fg=TEXT).pack(side=tk.LEFT)
+        self.atten_val_lbl = tk.Label(row, text="0 dB (unlimited)", font=("Sans", 9),
+                                      bg=PANEL, fg=RED)
+        self.atten_val_lbl.pack(side=tk.RIGHT)
+        self.atten_slider = HSlider(row, width=180, height=20, color=RED,
+                                    track=TRACK, bg=PANEL, value=0.0, minv=0, maxv=40,
+                                    command=self._on_atten_change)
+        self.atten_slider.pack(side=tk.RIGHT, padx=(0, 12))
+
+    def _update_atten_visibility(self):
+        if self.model.get() == "speechdenoiser":
+            self.atten_card.pack(fill=tk.X, padx=20, pady=(0, 14), before=self.wave_wrap)
+        else:
+            self.atten_card.pack_forget()
+
     def _build_waveform(self):
-        wrap = tk.Frame(self.root, bg=PANEL)
-        wrap.pack(padx=20, pady=(0, 16))
-        self.wave_canvas = tk.Canvas(wrap, width=WAVE_WIDTH, height=WAVE_HEIGHT,
+        self.wave_wrap = tk.Frame(self.root, bg=PANEL)
+        self.wave_wrap.pack(padx=20, pady=(0, 16))
+        self.wave_canvas = tk.Canvas(self.wave_wrap, width=WAVE_WIDTH, height=WAVE_HEIGHT,
                                      bg=PANEL, highlightthickness=0)
         self.wave_canvas.pack(padx=10, pady=10)
 
     def _build_sliders(self):
         card = tk.Frame(self.root, bg=PANEL)
-        card.pack(padx=20, pady=(0, 6))
+        card.pack(fill=tk.X, padx=20, pady=(0, 6))
 
-        top = tk.Frame(card, bg=PANEL)
-        top.pack(pady=(14, 4))
-        self.wet_mute_btn = tk.Button(
-            top, text="\U0001F50A", font=("Sans", 11), bg=PANEL, fg=SUBTEXT,
-            bd=0, relief=tk.FLAT, highlightthickness=0, activebackground=PANEL,
-            activeforeground=SUBTEXT, cursor="hand2", command=self._toggle_mute_wet)
-        self.wet_mute_btn.pack(side=tk.LEFT, padx=(0, 6))
-        tk.Label(top, text="De-Musiced", font=("Sans", 10, "bold"), bg=PANEL,
-                 fg=TEXT).pack(side=tk.LEFT)
-
-        self.mix_slider = VSlider(card, width=30, height=150, color=RED, track=TRACK,
-                                  bg=PANEL, value=100.0, minv=0, maxv=100,
-                                  command=self._on_mix_change)
-        self.mix_slider.pack(pady=6)
-        self.mix_val_lbl = tk.Label(card, text="100%", font=("Sans", 9),
-                                    bg=PANEL, fg=RED)
-        self.mix_val_lbl.pack(pady=(2, 6))
-
-        bottom = tk.Frame(card, bg=PANEL)
-        bottom.pack(pady=(4, 14))
+        row = tk.Frame(card, bg=PANEL)
+        row.pack(fill=tk.X, padx=14, pady=(14, 4))
         self.dry_mute_btn = tk.Button(
-            bottom, text="\U0001F50A", font=("Sans", 11), bg=PANEL, fg=SUBTEXT,
+            row, text="\U0001F50A", font=("Sans", 11), bg=PANEL, fg=SUBTEXT,
             bd=0, relief=tk.FLAT, highlightthickness=0, activebackground=PANEL,
             activeforeground=SUBTEXT, cursor="hand2", command=self._toggle_mute_dry)
-        self.dry_mute_btn.pack(side=tk.LEFT, padx=(0, 6))
-        tk.Label(bottom, text="Original", font=("Sans", 10, "bold"), bg=PANEL,
-                 fg=TEXT).pack(side=tk.LEFT)
+        self.dry_mute_btn.pack(side=tk.LEFT)
+        tk.Label(row, text="Original", font=("Sans", 10, "bold"), bg=PANEL,
+                 fg=TEXT).pack(side=tk.LEFT, padx=(6, 0))
+
+        self.wet_mute_btn = tk.Button(
+            row, text="\U0001F50A", font=("Sans", 11), bg=PANEL, fg=SUBTEXT,
+            bd=0, relief=tk.FLAT, highlightthickness=0, activebackground=PANEL,
+            activeforeground=SUBTEXT, cursor="hand2", command=self._toggle_mute_wet)
+        self.wet_mute_btn.pack(side=tk.RIGHT)
+        tk.Label(row, text="De-Musiced", font=("Sans", 10, "bold"), bg=PANEL,
+                 fg=TEXT).pack(side=tk.RIGHT, padx=(0, 6))
+
+        self.mix_slider = HSlider(card, width=340, height=26, color=RED, track=TRACK,
+                                  bg=PANEL, value=100.0, minv=0, maxv=100,
+                                  command=self._on_mix_change)
+        self.mix_slider.pack(padx=14, pady=(6, 2))
+        self.mix_val_lbl = tk.Label(card, text="100%", font=("Sans", 9),
+                                    bg=PANEL, fg=RED)
+        self.mix_val_lbl.pack(pady=(0, 14))
 
     # -- mix / mute callbacks -----------------------------------------------------
     def _on_mix_change(self, value):
@@ -203,6 +241,13 @@ class App:
             self.engine.set_volumes(dry=1.0, wet=1.0,
                                     mute_dry=self.mute_dry, mute_wet=self.mute_wet)
 
+    def _on_atten_change(self, value):
+        self.atten_db = value
+        self.atten_val_lbl.config(
+            text="0 dB (unlimited)" if value < 0.5 else f"{round(value)} dB")
+        if self.engine:
+            self.engine.set_atten_limit(value)
+
     def _toggle_midside(self):
         self.midside_enabled = not self.midside_enabled
         self.midside_btn.config(
@@ -213,8 +258,19 @@ class App:
         if self.engine:
             self.engine.set_midside(self.midside_enabled)
 
+    def _toggle_bandlimit(self):
+        self.bandlimit_enabled = not self.bandlimit_enabled
+        self.bandlimit_btn.config(
+            text=f"Band-Limit (20 Hz-20 kHz): {'ON' if self.bandlimit_enabled else 'OFF'}",
+            fg=TEXT if self.bandlimit_enabled else SUBTEXT,
+            bg=RED if self.bandlimit_enabled else PANEL,
+            activebackground=RED if self.bandlimit_enabled else PANEL)
+        if self.engine:
+            self.engine.set_bandlimit(self.bandlimit_enabled)
+
     # -- pipeline / output pickers (live-switchable) -----------------------------
     def _on_model_change(self, _evt=None):
+        self._update_atten_visibility()
         if not (self.enabled and self.engine):
             return
         try:
@@ -269,6 +325,8 @@ class App:
             self.engine = AudioEngine(proc)
             self.engine.set_intensity(self.mix_pct / 100.0)
             self.engine.set_midside(self.midside_enabled)
+            self.engine.set_bandlimit(self.bandlimit_enabled)
+            self.engine.set_atten_limit(self.atten_db)
             self._push_mutes()
             self.engine.start(self.routing.monitor_source, real.name)
             self.enabled = True
