@@ -1,0 +1,20 @@
+{
+  "name": "dtln",
+  "files": ["dtln_model_1.onnx", "dtln_model_2.onnx"],
+  "runtime": "onnxruntime",
+  "type": "speech-enhancement",
+  "architecture": "dual-stage LSTM (breizhn/DTLN) — stage 1 predicts a magnitude mask, stage 2 refines the result in the time domain; separate LSTM state per stage",
+  "sample_rate": 16000,
+  "block_len": 512,
+  "block_shift": 128,
+  "framing": "rectangular (no analysis/synthesis window) — model trained end-to-end against this exact framing",
+  "license": "MIT (breizhn/DTLN — verified 2026-07-24 on GitHub repo)",
+  "source": "https://github.com/breizhn/DTLN — standard public ONNX export (tensor names input_2/input_3/activation_2/tf_op_layer_stack_2 for stage 1, input_4/input_5/conv1d_3/tf_op_layer_stack_5 for stage 2; no embedded metadata, no local provenance file, but these are exactly the tensor names of breizhn's published export)",
+  "benchmarks": {
+    "machine": "yoake-pad CPU, 2026-07-24",
+    "ms_per_20ms_block": 2.27,
+    "rtf": 0.114,
+    "algorithmic_latency_ms": 24.0
+  },
+  "notes": "Different architecture family from GTCRN/DPDFNet (dual-LSTM vs. STFT-domain complex mask), added as a second independent option to compare vocal retention against. Offline bench shows the same shared-limitation pattern as the other enhancers here (strong on noise, weak on music/speech) rather than a clear win — by-ear comparison still pending."
+}

@@ -11,9 +11,11 @@ def main():
     ap = argparse.ArgumentParser(prog="assassin_live")
     ap.add_argument("--headless", action="store_true",
                     help="no GUI; enable filter until Ctrl-C")
-    ap.add_argument("--model", default="gtcrn")
+    ap.add_argument("--model", default="dpdfnet_hr")
     ap.add_argument("--bypass", action="store_true",
                     help="route audio but skip processing (plumbing test)")
+    ap.add_argument("--midside", action="store_true",
+                    help="enable the mid/side stereo pre-filter ahead of the model")
     ap.add_argument("--list-models", action="store_true")
     ap.add_argument("--recover", action="store_true",
                     help="clean up stale trap sinks and restore default sink")
@@ -47,6 +49,7 @@ def main():
         raise SystemExit("no hardware sink available")
     engine = AudioEngine(proc)
     engine.set_bypass(args.bypass)
+    engine.set_midside(args.midside)
     engine.start(routing.monitor_source, real.name)
     print(f"filtering -> {real.name}  (model: {proc.name}, Ctrl-C to stop)")
     try:

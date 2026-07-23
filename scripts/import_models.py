@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from assassin_live.paths import data_dir  # noqa: E402
 
 FILES = ["gtcrn_simple.onnx", "dpdfnet_baseline.onnx", "dpdfnet2_48khz_hr.onnx",
-        "speechdenoiser.onnx"]
+        "dtln_model_1.onnx", "dtln_model_2.onnx", "speechdenoiser.onnx"]
 
 
 def main():

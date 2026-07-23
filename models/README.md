@@ -23,6 +23,7 @@ The `.json` files here are the model cards for the current model set.
 | gtcrn | MIT | yes — include upstream license text |
 | dpdfnet | Apache-2.0 (Ceva-IP) | yes — include license text + attribution |
 | dpdfnet_hr | Apache-2.0 (Ceva-IP, same collection as dpdfnet) | yes — include license text + attribution |
+| dtln | MIT (breizhn/DTLN) | yes — include upstream license text |
 | speechdenoiser | **unresolved** — upstream repo has no license | **no** — see its model card |
 
 speechdenoiser stays usable for local development (user drops the file in

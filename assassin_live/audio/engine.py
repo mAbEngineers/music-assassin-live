@@ -13,6 +13,7 @@ signal instead of glitching, and the wet/dry mix is always ramped (20 ms) so
 toggling never clicks.
 """
 
+import collections
 import os
 import queue
 import threading
@@ -21,6 +22,7 @@ import time
 import numpy as np
 
 from ..processors.base import StreamProcessor
+from .midside import MidSideFilter
 
 SAMPLE_RATE = 48000
 BLOCK = 960          # 20 ms
@@ -54,33 +56,84 @@ def _reinit_portaudio():
 
 class AudioEngine:
     def __init__(self, processor: StreamProcessor):
-        self.proc = processor
         self.stats = EngineStats()
         self._in_q: queue.Queue = queue.Queue(maxsize=8)
         self._out = np.zeros(0, dtype=np.float32)  # processed mono FIFO
         self._lock = threading.Lock()
         self._running = False
-        self._wet_target = 1.0   # 1 = process, 0 = bypass (dry)
-        self._wet_gain = 0.0
+        self._wet_target = 1.0   # mix intensity: 1 = fully processed, 0 = fully original
+        self._wet_gain = 0.0     # current interpolated mix (ramped, click-free)
+        self._dry_volume = 1.0   # original-signal gain
+        self._wet_volume = 1.0   # processed-signal gain
+        self._mute_dry = False
+        self._mute_wet = False
         self._stream = None
         self._worker = None
+        self._levels: collections.deque = collections.deque(maxlen=64)
+        self._midside = MidSideFilter()
+        self._midside_enabled = False
 
-        if processor.sample_rate != SAMPLE_RATE:
-            import soxr
-            self._down = soxr.ResampleStream(
-                SAMPLE_RATE, processor.sample_rate, 1, dtype="float32")
-            self._up = soxr.ResampleStream(
-                processor.sample_rate, SAMPLE_RATE, 1, dtype="float32")
-        else:
-            self._down = self._up = None
+        # (processor, downsampler, upsampler) swapped as one unit so the
+        # worker thread never reads a processor paired with the wrong
+        # resamplers mid-switch
+        self._runtime = self._build_runtime(processor)
 
         # bound how much processed audio may pile up before we drop old
         # samples (keeps wet path from drifting seconds behind live audio)
         self._max_out = BLOCK * 8
 
+    @staticmethod
+    def _build_runtime(processor: StreamProcessor):
+        processor.reset()
+        if processor.sample_rate != SAMPLE_RATE:
+            import soxr
+            down = soxr.ResampleStream(
+                SAMPLE_RATE, processor.sample_rate, 1, dtype="float32")
+            up = soxr.ResampleStream(
+                processor.sample_rate, SAMPLE_RATE, 1, dtype="float32")
+        else:
+            down = up = None
+        return processor, down, up
+
+    @property
+    def proc(self) -> StreamProcessor:
+        return self._runtime[0]
+
     # -- control -------------------------------------------------------------
+    def set_processor(self, processor: StreamProcessor) -> None:
+        """Hot-swap the model/pipeline while the stream keeps running."""
+        self._runtime = self._build_runtime(processor)
+
+    def recent_levels(self) -> list:
+        """Copy of the most recent output RMS levels, oldest first — for a
+        live waveform/level meter."""
+        return list(self._levels)
+
+    def set_intensity(self, intensity: float) -> None:
+        """Music-removal intensity: 0.0 = fully original, 1.0 = fully processed."""
+        self._wet_target = float(np.clip(intensity, 0.0, 1.0))
+
     def set_bypass(self, bypass: bool) -> None:
-        self._wet_target = 0.0 if bypass else 1.0
+        self.set_intensity(0.0 if bypass else 1.0)
+
+    def set_midside(self, enabled: bool) -> None:
+        """Toggle the mid/side stereo pre-filter (see audio/midside.py):
+        suppresses wide-panned content ahead of the enhancer, using stereo
+        panning instead of spectral guessing. Off by default — stacks
+        with whichever pipeline model is selected."""
+        self._midside_enabled = enabled
+
+    def set_volumes(self, dry: float | None = None, wet: float | None = None,
+                     mute_dry: bool | None = None, mute_wet: bool | None = None) -> None:
+        """Independent gain for the original (dry) and de-musiced (wet) paths."""
+        if dry is not None:
+            self._dry_volume = float(dry)
+        if wet is not None:
+            self._wet_volume = float(wet)
+        if mute_dry is not None:
+            self._mute_dry = mute_dry
+        if mute_wet is not None:
+            self._mute_wet = mute_wet
 
     def start(self, monitor_source: str, sink_name: str) -> None:
         import sounddevice as sd
@@ -90,6 +143,8 @@ class AudioEngine:
         _reinit_portaudio()
 
         self.proc.reset()
+        self._midside.reset()
+        self._levels.clear()
         self._running = True
         self._worker = threading.Thread(target=self._work, daemon=True)
         self._worker.start()
@@ -157,7 +212,10 @@ class AudioEngine:
             self._wet_gain = float(g1)
         else:
             ramp = g0
-        outdata[:] = dry * (1.0 - ramp) + wet * ramp
+        dry_g = 0.0 if self._mute_dry else self._dry_volume
+        wet_g = 0.0 if self._mute_wet else self._wet_volume
+        outdata[:] = dry * dry_g * (1.0 - ramp) + wet * wet_g * ramp
+        self._levels.append(float(np.sqrt(np.mean(np.square(outdata)))))
 
     def _work(self) -> None:
         while self._running:
@@ -165,12 +223,16 @@ class AudioEngine:
                 block = self._in_q.get(timeout=0.2)
             except queue.Empty:
                 continue
+            proc, down, up = self._runtime
             t0 = time.perf_counter()
-            mono = block.mean(axis=1)
-            x = self._down.resample_chunk(mono) if self._down is not None else mono
-            y = self.proc.feed(x)
-            if self._up is not None and len(y):
-                y = self._up.resample_chunk(y)
+            mono = (self._midside.process(block) if self._midside_enabled
+                   else block.mean(axis=1))
+            if len(mono) == 0:
+                continue
+            x = down.resample_chunk(mono) if down is not None else mono
+            y = proc.feed(x)
+            if up is not None and len(y):
+                y = up.resample_chunk(y)
             ms = (time.perf_counter() - t0) * 1000.0
             self.stats.worker_ms_avg = 0.9 * self.stats.worker_ms_avg + 0.1 * ms
             if len(y) == 0:

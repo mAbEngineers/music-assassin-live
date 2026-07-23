@@ -63,19 +63,32 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 | name | file | rate | notes |
 |---|---|---|---|
-| gtcrn | gtcrn_simple.onnx (2 MB) | 16 kHz | default; lightest |
-| speechdenoiser | speechdenoiser.onnx | 48 kHz | no resampling path |
-| dpdfnet | dpdfnet_baseline.onnx | 16 kHz | experimental (see module docstring) |
-| dpdfnet_hr | dpdfnet2_48khz_hr.onnx | 48 kHz | same family as dpdfnet, no resampling path; quality vs. baseline not yet judged by ear |
+| dpdfnet_hr | dpdfnet2_48khz_hr.onnx | 48 kHz | **default** — best vocal retention of these by ear so far, though still imperfect |
+| gtcrn | gtcrn_simple.onnx (2 MB) | 16 kHz | lightest; cuts vocals too aggressively (by-ear finding) |
+| dpdfnet | dpdfnet_baseline.onnx | 16 kHz | experimental (see module docstring); cuts vocals too aggressively (by-ear finding) |
+| dtln | dtln_model_1.onnx + dtln_model_2.onnx | 16 kHz | dual-LSTM architecture (breizhn/DTLN), a genuinely different design from the others; added to compare, not yet judged by ear |
+| speechdenoiser | speechdenoiser.onnx | 48 kHz | no resampling path; keeps clear spoken dialogue well but still cuts singing |
 
-All are speech-enhancement models. Measured behavior (live e2e, 2026-07-04):
-noise and noise-like backgrounds are strongly removed (−29 to −63 dB on
-white noise), but prominent or vocal-heavy music largely passes through
-(−0.4 to −1.7 dB on a music+dialogue mix — the models read it as speech).
-The research repo's own DeepFilterNet diagnostics show the same (−0.6 to
-−8 dB per segment). True music removal needs a realtime source-separation
-model — an open research-repo problem; it drops in here with zero app
-changes via the processor interface.
+All are speech-enhancement models: they classify content by how
+speech-like it sounds, which is why every one of them struggles with
+singing to some degree — a sung vocal reads spectrally closer to "music"
+than spoken dialogue does. Noise and noise-like backgrounds are strongly
+removed (−29 to −63 dB on white noise); prominent or vocal-heavy music
+largely passes through (−0.4 to −1.7 dB on a music+dialogue mix). The
+research repo's own DeepFilterNet diagnostics show the same pattern
+(−0.6 to −8 dB per segment). True music removal needs a realtime
+source-separation model — an open research-repo problem; it drops in
+here with zero app changes via the processor interface.
+
+**Mid/side stereo pre-filter** (`assassin_live/audio/midside.py`, toggle
+in the GUI or `--midside` headless): a complementary, non-model lever for
+the same problem. Runs on the raw stereo capture before any model sees
+it, using stereo panning rather than spectral guessing — lead vocals are
+almost always mixed dead-center, instrumental backing is mixed wide, so
+attenuating by `M²/(M²+S²)` per STFT bin (mid/side energy ratio) directly
+targets exactly the content models misclassify. Off by default; stacks
+with whichever pipeline model is selected, so it's meant to be compared
+on/off rather than treated as a fixed answer.
 
 ## Status
 
