@@ -10,7 +10,9 @@ moves our stream nodes to the right targets with PipeWire metadata.
 The audio callback only moves blocks between ring buffers; inference runs on
 a worker thread. If the worker falls behind, the callback emits the dry
 signal instead of glitching, and the wet/dry mix is always ramped (20 ms) so
-toggling never clicks.
+toggling never clicks. Dry is delayed through its own FIFO in lockstep with
+the wet one (see _dry_out) so both always refer to the same original
+instant — mixing live dry against lagged wet sounded like an echo.
 """
 
 import collections
@@ -60,6 +62,12 @@ class AudioEngine:
         self.stats = EngineStats()
         self._in_q: queue.Queue = queue.Queue(maxsize=8)
         self._out = np.zeros(0, dtype=np.float32)  # processed mono FIFO
+        # dry audio delayed through the same FIFO pattern as _out (fed and
+        # drained in lockstep, callback-thread-only so no lock needed) —
+        # mixing live indata against wet (which lags by the model's
+        # algorithmic latency + queue/worker hand-off) produced an audible
+        # echo/doubling instead of a blend; see stop()/_callback below.
+        self._dry_out = np.zeros((0, 2), dtype=np.float32)
         self._lock = threading.Lock()
         self._running = False
         self._wet_target = 1.0   # mix intensity: 1 = fully processed, 0 = fully original
@@ -202,6 +210,7 @@ class AudioEngine:
             self._in_q.queue.clear()
         with self._lock:
             self._out = np.zeros(0, dtype=np.float32)
+        self._dry_out = np.zeros((0, 2), dtype=np.float32)
         self._wet_gain = 0.0
 
     def retarget(self, monitor_source: str, sink_name: str) -> None:
@@ -216,15 +225,31 @@ class AudioEngine:
         self.stats.blocks_in += 1
         try:
             self._in_q.put_nowait(indata.copy())
+            self._dry_out = np.concatenate([self._dry_out, indata])
+            if len(self._dry_out) > self._max_out:
+                self._dry_out = self._dry_out[-self._max_out:]
         except queue.Full:
             self.stats.overflows += 1
+            # dropped this block from processing — skip it here too, so the
+            # dry FIFO never gets ahead of what wet will actually produce
 
         with self._lock:
             take = min(frames, len(self._out))
             wet_mono = self._out[:take]
             self._out = self._out[take:]
 
-        dry = indata
+        # dry pulled from the same lockstep FIFO as wet (both fed once per
+        # callback, both drained by the same amount here) so they always
+        # refer to the same original instant, however large the model's
+        # actual latency turns out to be — using live indata instead made
+        # the dry/wet mix sound like an echo rather than a blend.
+        take_dry = min(take, len(self._dry_out))
+        dry = np.empty_like(indata)
+        dry[:take_dry] = self._dry_out[:take_dry]
+        if take_dry < frames:
+            dry[take_dry:] = indata[take_dry:]  # startup-only fallback
+        self._dry_out = self._dry_out[take_dry:]
+
         wet = np.empty_like(dry)
         wet[:take, 0] = wet_mono
         wet[:take, 1] = wet_mono
