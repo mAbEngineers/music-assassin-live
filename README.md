@@ -1,10 +1,15 @@
 # Music Assassin Live
 
+[![Latest release](https://img.shields.io/github/v/release/mAbEngineers/music-assassin-live)](https://github.com/mAbEngineers/music-assassin-live/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/mAbEngineers/music-assassin-live/total)](https://github.com/mAbEngineers/music-assassin-live/releases)
+[![License: MIT](https://img.shields.io/github/license/mAbEngineers/music-assassin-live)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%28PipeWire%29-blue)](#requirements)
+
 System-wide realtime music removal for Linux — works like a volume booster:
 one toggle, and everything the device plays gets background music stripped
 before it reaches the speaker. No per-app setup, no manual audio routing.
 
-Sibling repo of [Music-Assassin](https://github.com/A-Ahmad-02/Music-Assassin)
+Sibling repo of [Music-Assassin](https://github.com/mAbEngineers/Music-Assassin)
 (the research lab where filtering methods are tested and benchmarked). This
 repo is the shippable app: routing, streaming engine, UI, packaging. Models
 arrive here as ONNX release assets — see `docs/ARCHITECTURE.md` §3 for the
