@@ -9,12 +9,15 @@ second: routing.check() re-asserts the trap sink and retargets the engine
 when the output device changes (Bluetooth headset reconnects etc.).
 """
 
+import json
+import sys
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk, messagebox
 
 from ..audio.engine import AudioEngine
 from ..audio.routing import RoutingSession, list_sinks, SINK_NAME
-from ..paths import models_dir
+from ..paths import models_dir, SETTINGS_FILE
 from .. import processors
 from .widgets import HSlider
 
@@ -32,16 +35,26 @@ WAVE_WIDTH = 380
 WAVE_HEIGHT = 68
 
 
+def _icon_path() -> Path:
+    # PyInstaller onefile: bundled at the archive root (see scripts/build_deb.sh).
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "icon.png"
+    return Path(__file__).resolve().parent / "assets" / "icon.png"
+
+
 class App:
     def __init__(self):
+        saved = self._load_settings()
         self.routing = RoutingSession()
+        self.routing.preferred_name = saved.get("output_name")
         self.engine: AudioEngine | None = None
-        self.mute_dry = False
-        self.mute_wet = False
-        self.mix_pct = 100.0
-        self.midside_enabled = False
-        self.bandlimit_enabled = True
-        self.atten_db = 0.0
+        self.mute_dry = saved.get("mute_dry", False)
+        self.mute_wet = saved.get("mute_wet", False)
+        self.mix_pct = saved.get("mix_pct", 100.0)
+        self.midside_enabled = saved.get("midside_enabled", False)
+        self.bandlimit_enabled = saved.get("bandlimit_enabled", True)
+        self.atten_db = saved.get("atten_db", 0.0)
+        self._initial_pipeline = saved.get("pipeline", "dpdfnet_hr")
         self.output_map: dict[str, str] = {}
 
         self.root = tk.Tk()
@@ -50,6 +63,11 @@ class App:
         self.root.resizable(False, False)
         self.root.configure(bg=BG)
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
+
+        icon_path = _icon_path()
+        if icon_path.is_file():
+            self._icon_img = tk.PhotoImage(file=str(icon_path))  # kept alive on self
+            self.root.iconphoto(True, self._icon_img)
 
         self._build_style()
         self._build_header()
@@ -70,6 +88,29 @@ class App:
         self._refresh_outputs()
         self.root.after(1000, self._tick)
         self.root.after(90, self._wave_tick)
+
+    # -- settings persistence ----------------------------------------------------
+    @staticmethod
+    def _load_settings() -> dict:
+        try:
+            return json.loads(SETTINGS_FILE.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _save_settings(self) -> None:
+        try:
+            SETTINGS_FILE.write_text(json.dumps({
+                "pipeline": self.model.get(),
+                "output_name": self.routing.preferred_name,
+                "mix_pct": self.mix_pct,
+                "mute_dry": self.mute_dry,
+                "mute_wet": self.mute_wet,
+                "midside_enabled": self.midside_enabled,
+                "bandlimit_enabled": self.bandlimit_enabled,
+                "atten_db": self.atten_db,
+            }))
+        except OSError:
+            pass  # best-effort; a failed save shouldn't block quitting
 
     # -- style -----------------------------------------------------------------
     def _build_style(self):
@@ -106,6 +147,12 @@ class App:
                              cursor="hand2", command=self._toggle)
         self.btn.pack(side=tk.RIGHT, anchor="e")
 
+    def _pick_default_model(self, names: list[str]) -> str:
+        for candidate in (self._initial_pipeline, "dpdfnet_hr", "gtcrn"):
+            if candidate and candidate in names:
+                return candidate
+        return names[0]
+
     def _build_pickers(self):
         row = tk.Frame(self.root, bg=BG)
         row.pack(fill=tk.X, padx=20, pady=(0, 14))
@@ -114,12 +161,10 @@ class App:
         left.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
         tk.Label(left, text="Pipeline", font=("Sans", 8), bg=PANEL,
                  fg=SUBTEXT).pack(anchor="w", padx=12, pady=(6, 0))
-        self.model = tk.StringVar(value="dpdfnet_hr")
         names = processors.available(models_dir())
+        self.model = tk.StringVar(value=self._pick_default_model(names))
         self.model_box = ttk.Combobox(left, textvariable=self.model, values=names,
                                       state="readonly", style="TCombobox")
-        if "dpdfnet_hr" not in names:
-            self.model.set("gtcrn" if "gtcrn" in names else names[0])
         self.model_box.pack(fill=tk.X, padx=10, pady=(0, 8))
         self.model_box.bind("<<ComboboxSelected>>", self._on_model_change)
 
@@ -133,24 +178,33 @@ class App:
         self.output_box.pack(fill=tk.X, padx=10, pady=(0, 8))
         self.output_box.bind("<<ComboboxSelected>>", self._on_output_change)
 
+    def _style_toggle_btn(self, btn: tk.Button, label: str, enabled: bool) -> None:
+        btn.config(
+            text=f"{label}: {'ON' if enabled else 'OFF'}",
+            fg=TEXT if enabled else SUBTEXT,
+            bg=RED if enabled else PANEL,
+            activebackground=RED if enabled else PANEL,
+            activeforeground=TEXT if enabled else SUBTEXT)
+
     def _build_midside_toggle(self):
         row = tk.Frame(self.root, bg=BG)
         row.pack(fill=tk.X, padx=20, pady=(0, 14))
         self.midside_btn = tk.Button(
-            row, text="Mid/Side Prefilter: OFF", font=("Sans", 9, "bold"),
-            fg=SUBTEXT, bg=PANEL, activebackground=PANEL, activeforeground=SUBTEXT,
-            bd=0, relief=tk.FLAT, highlightthickness=0, padx=10, pady=8,
-            cursor="hand2", command=self._toggle_midside)
+            row, font=("Sans", 9, "bold"), bd=0, relief=tk.FLAT,
+            highlightthickness=0, padx=10, pady=8, cursor="hand2",
+            command=self._toggle_midside)
+        self._style_toggle_btn(self.midside_btn, "Mid/Side Prefilter", self.midside_enabled)
         self.midside_btn.pack(fill=tk.X)
 
     def _build_bandlimit_toggle(self):
         row = tk.Frame(self.root, bg=BG)
         row.pack(fill=tk.X, padx=20, pady=(0, 14))
         self.bandlimit_btn = tk.Button(
-            row, text="Band-Limit (20 Hz-20 kHz): ON", font=("Sans", 9, "bold"),
-            fg=TEXT, bg=RED, activebackground=RED, activeforeground=TEXT,
-            bd=0, relief=tk.FLAT, highlightthickness=0, padx=10, pady=8,
-            cursor="hand2", command=self._toggle_bandlimit)
+            row, font=("Sans", 9, "bold"), bd=0, relief=tk.FLAT,
+            highlightthickness=0, padx=10, pady=8, cursor="hand2",
+            command=self._toggle_bandlimit)
+        self._style_toggle_btn(self.bandlimit_btn, "Band-Limit (20 Hz-20 kHz)",
+                               self.bandlimit_enabled)
         self.bandlimit_btn.pack(fill=tk.X)
 
     def _build_atten_slider(self):
@@ -164,12 +218,12 @@ class App:
         row.pack(fill=tk.X, padx=14, pady=10)
         tk.Label(row, text="Suppression Limit", font=("Sans", 9, "bold"),
                  bg=PANEL, fg=TEXT).pack(side=tk.LEFT)
-        self.atten_val_lbl = tk.Label(row, text="0 dB (unlimited)", font=("Sans", 9),
-                                      bg=PANEL, fg=RED)
+        self.atten_val_lbl = tk.Label(row, text=self._atten_label(self.atten_db),
+                                      font=("Sans", 9), bg=PANEL, fg=RED)
         self.atten_val_lbl.pack(side=tk.RIGHT)
         self.atten_slider = HSlider(row, width=180, height=20, color=RED,
-                                    track=TRACK, bg=PANEL, value=0.0, minv=0, maxv=40,
-                                    command=self._on_atten_change)
+                                    track=TRACK, bg=PANEL, value=self.atten_db,
+                                    minv=0, maxv=40, command=self._on_atten_change)
         self.atten_slider.pack(side=tk.RIGHT, padx=(0, 12))
 
     def _update_atten_visibility(self):
@@ -192,79 +246,85 @@ class App:
         row = tk.Frame(card, bg=PANEL)
         row.pack(fill=tk.X, padx=14, pady=(14, 4))
         self.dry_mute_btn = tk.Button(
-            row, text="\U0001F50A", font=("Sans", 11), bg=PANEL, fg=SUBTEXT,
-            bd=0, relief=tk.FLAT, highlightthickness=0, activebackground=PANEL,
-            activeforeground=SUBTEXT, cursor="hand2", command=self._toggle_mute_dry)
+            row, font=("Sans", 11), bg=PANEL, bd=0, relief=tk.FLAT,
+            highlightthickness=0, activebackground=PANEL, cursor="hand2",
+            command=self._toggle_mute_dry)
         self.dry_mute_btn.pack(side=tk.LEFT)
         tk.Label(row, text="Original", font=("Sans", 10, "bold"), bg=PANEL,
                  fg=TEXT).pack(side=tk.LEFT, padx=(6, 0))
 
         self.wet_mute_btn = tk.Button(
-            row, text="\U0001F50A", font=("Sans", 11), bg=PANEL, fg=SUBTEXT,
-            bd=0, relief=tk.FLAT, highlightthickness=0, activebackground=PANEL,
-            activeforeground=SUBTEXT, cursor="hand2", command=self._toggle_mute_wet)
+            row, font=("Sans", 11), bg=PANEL, bd=0, relief=tk.FLAT,
+            highlightthickness=0, activebackground=PANEL, cursor="hand2",
+            command=self._toggle_mute_wet)
         self.wet_mute_btn.pack(side=tk.RIGHT)
         tk.Label(row, text="De-Musiced", font=("Sans", 10, "bold"), bg=PANEL,
                  fg=TEXT).pack(side=tk.RIGHT, padx=(0, 6))
+        self._style_mute_btn(self.dry_mute_btn, self.mute_dry)
+        self._style_mute_btn(self.wet_mute_btn, self.mute_wet)
 
         self.mix_slider = HSlider(card, width=340, height=26, color=RED, track=TRACK,
-                                  bg=PANEL, value=100.0, minv=0, maxv=100,
+                                  bg=PANEL, value=self.mix_pct, minv=0, maxv=150,
+                                  markers=(50, 100), marker_color=SUBTEXT,
                                   command=self._on_mix_change)
         self.mix_slider.pack(padx=14, pady=(6, 2))
-        self.mix_val_lbl = tk.Label(card, text="100%", font=("Sans", 9),
+        self.mix_val_lbl = tk.Label(card, text=f"{round(self.mix_pct)}%", font=("Sans", 9),
                                     bg=PANEL, fg=RED)
         self.mix_val_lbl.pack(pady=(0, 14))
 
     # -- mix / mute callbacks -----------------------------------------------------
+    @staticmethod
+    def _wet_boost(mix_pct: float) -> float:
+        # past 100% the crossfade is already fully wet; extra travel boosts
+        # wet gain instead, up to 1.5x, to offset post-processing loudness loss
+        return 1.0 + max(0.0, mix_pct - 100.0) / 100.0
+
     def _on_mix_change(self, value):
         self.mix_pct = value
         self.mix_val_lbl.config(text=f"{round(value)}%")
         if self.engine:
             self.engine.set_intensity(value / 100.0)
+            self.engine.set_volumes(wet=self._wet_boost(value))
+
+    @staticmethod
+    def _style_mute_btn(btn: tk.Button, muted: bool) -> None:
+        btn.config(text="\U0001F507" if muted else "\U0001F50A",
+                  fg=RED if muted else SUBTEXT, activeforeground=RED if muted else SUBTEXT)
 
     def _toggle_mute_dry(self):
         self.mute_dry = not self.mute_dry
-        self.dry_mute_btn.config(
-            text="\U0001F507" if self.mute_dry else "\U0001F50A",
-            fg=RED if self.mute_dry else SUBTEXT)
+        self._style_mute_btn(self.dry_mute_btn, self.mute_dry)
         self._push_mutes()
 
     def _toggle_mute_wet(self):
         self.mute_wet = not self.mute_wet
-        self.wet_mute_btn.config(
-            text="\U0001F507" if self.mute_wet else "\U0001F50A",
-            fg=RED if self.mute_wet else SUBTEXT)
+        self._style_mute_btn(self.wet_mute_btn, self.mute_wet)
         self._push_mutes()
 
     def _push_mutes(self):
         if self.engine:
-            self.engine.set_volumes(dry=1.0, wet=1.0,
-                                    mute_dry=self.mute_dry, mute_wet=self.mute_wet)
+            self.engine.set_volumes(mute_dry=self.mute_dry, mute_wet=self.mute_wet)
+
+    @staticmethod
+    def _atten_label(value: float) -> str:
+        return "0 dB (unlimited)" if value < 0.5 else f"{round(value)} dB"
 
     def _on_atten_change(self, value):
         self.atten_db = value
-        self.atten_val_lbl.config(
-            text="0 dB (unlimited)" if value < 0.5 else f"{round(value)} dB")
+        self.atten_val_lbl.config(text=self._atten_label(value))
         if self.engine:
             self.engine.set_atten_limit(value)
 
     def _toggle_midside(self):
         self.midside_enabled = not self.midside_enabled
-        self.midside_btn.config(
-            text=f"Mid/Side Prefilter: {'ON' if self.midside_enabled else 'OFF'}",
-            fg=TEXT if self.midside_enabled else SUBTEXT,
-            bg=RED if self.midside_enabled else PANEL,
-            activebackground=RED if self.midside_enabled else PANEL)
+        self._style_toggle_btn(self.midside_btn, "Mid/Side Prefilter", self.midside_enabled)
         if self.engine:
             self.engine.set_midside(self.midside_enabled)
 
     def _toggle_bandlimit(self):
         self.bandlimit_enabled = not self.bandlimit_enabled
-        self.bandlimit_btn.config(
-            text=f"Band-Limit (20 Hz-20 kHz): {'ON' if self.bandlimit_enabled else 'OFF'}",
-            fg=TEXT if self.bandlimit_enabled else SUBTEXT,
-            bg=RED if self.bandlimit_enabled else PANEL,
-            activebackground=RED if self.bandlimit_enabled else PANEL)
+        self._style_toggle_btn(self.bandlimit_btn, "Band-Limit (20 Hz-20 kHz)",
+                               self.bandlimit_enabled)
         if self.engine:
             self.engine.set_bandlimit(self.bandlimit_enabled)
 
@@ -290,6 +350,12 @@ class App:
             default_label = None
             if self.routing.real:
                 default_label = self.routing.real.description or self.routing.real.name
+            elif self.routing.preferred_name:
+                # not enabled yet (no routing.real) — try the saved device
+                for s in sinks:
+                    if s.name == self.routing.preferred_name:
+                        default_label = s.description or s.name
+                        break
             self.output_var.set(default_label if default_label in labels else labels[0])
 
     def _on_output_change(self, _evt=None):
@@ -324,6 +390,7 @@ class App:
                 return
             self.engine = AudioEngine(proc)
             self.engine.set_intensity(self.mix_pct / 100.0)
+            self.engine.set_volumes(wet=self._wet_boost(self.mix_pct))
             self.engine.set_midside(self.midside_enabled)
             self.engine.set_bandlimit(self.bandlimit_enabled)
             self.engine.set_atten_limit(self.atten_db)
@@ -399,6 +466,7 @@ class App:
         self.root.after(1000, self._tick)
 
     def _quit(self):
+        self._save_settings()
         self._turn_off()
         self.root.destroy()
 

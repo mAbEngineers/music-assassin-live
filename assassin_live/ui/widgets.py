@@ -13,7 +13,8 @@ class HSlider(tk.Canvas):
     Drag left/right."""
 
     def __init__(self, parent, *, width=300, height=24, color, track, bg,
-                 value=0.0, minv=0.0, maxv=40.0, command=None):
+                 value=0.0, minv=0.0, maxv=40.0, command=None,
+                 markers=(), marker_color="#9a9aa2"):
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0)
         self.w, self.h = width, height
@@ -21,6 +22,7 @@ class HSlider(tk.Canvas):
         self.minv, self.maxv = minv, maxv
         self.value = value
         self.command = command
+        self.markers, self.marker_color = markers, marker_color
         self.pad = DOT_RADIUS + 2
         self.bind("<ButtonPress-1>", self._on_pointer)
         self.bind("<B1-Motion>", self._on_pointer)
@@ -44,6 +46,13 @@ class HSlider(tk.Canvas):
         if frac > 0.001:
             self.create_line(x0, cy, xh, cy, fill=self.color,
                              width=TRACK_THICKNESS, capstyle=tk.ROUND)
+        span = self.maxv - self.minv
+        for marker in self.markers:
+            mfrac = 0.0 if span == 0 else (marker - self.minv) / span
+            mfrac = max(0.0, min(1.0, mfrac))
+            xm = self._x_for(mfrac)
+            self.create_line(xm, cy - DOT_RADIUS, xm, cy + DOT_RADIUS,
+                             fill=self.marker_color, width=2)
         self.create_oval(xh - DOT_RADIUS, cy - DOT_RADIUS,
                          xh + DOT_RADIUS, cy + DOT_RADIUS,
                          fill=self.color, outline="")
