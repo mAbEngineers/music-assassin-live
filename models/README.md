@@ -29,3 +29,9 @@ The `.json` files here are the model cards for the current model set.
 speechdenoiser stays usable for local development (user drops the file in
 themselves), but must not ship in releases until upstream adds a license or
 the model is re-exported from the dual-licensed DeepFilterNet3 source.
+
+`scripts/build_deb.sh` bundles the four redistributable models (with their
+upstream license texts, under `packaging/model-licenses/`) directly into
+the `.deb` at `/usr/share/music-assassin-live/models` — `assassin_live/paths.py`
+checks that location as a system-wide fallback, so the packaged app works
+immediately with no first-run download or manual copy step.

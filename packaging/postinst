@@ -1,0 +1,23 @@
+#!/bin/sh
+set -e
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor 2>/dev/null || true
+fi
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications 2>/dev/null || true
+fi
+
+cat <<'EOF'
+
+Music Assassin Live installed — ready to run, default model included.
+
+Openly-licensed models (gtcrn, dpdfnet, dpdfnet_hr, dtln) ship with this
+package under /usr/share/music-assassin-live/models. speechdenoiser is
+NOT included (its upstream license is unresolved — see
+/usr/share/doc/music-assassin-live/model-licenses); add it yourself in
+~/.local/share/music-assassin/models/ if you want it.
+
+EOF
+
+exit 0

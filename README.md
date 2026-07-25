@@ -90,6 +90,26 @@ targets exactly the content models misclassify. Off by default; stacks
 with whichever pipeline model is selected, so it's meant to be compared
 on/off rather than treated as a fixed answer.
 
+## Packaging
+
+```bash
+scripts/build_deb.sh    # -> dist/music-assassin-live_<version>_<arch>.deb
+sudo apt install dist/music-assassin-live_*.deb
+```
+
+Builds a onefile PyInstaller binary (bundles onnxruntime + tkinter) into a
+minimal `.deb` with a desktop entry. Depends on `libportaudio2` (apt pulls
+it in automatically — sounddevice looks it up via the system library
+cache at runtime, so it must be a real installed package, not just
+embedded in the binary). The
+openly-licensed models (gtcrn, dpdfnet, dpdfnet_hr, dtln) are bundled into
+`/usr/share/music-assassin-live/models` at build time and picked up
+automatically — `apt install` and go, no manual step. `speechdenoiser` is
+excluded (its upstream license is unresolved, see `models/README.md`); add
+it yourself in `~/.local/share/music-assassin/models/` if you want it.
+Windows and mobile packaging are not yet possible — see
+`docs/ARCHITECTURE.md` §6 (Platform Reality Check).
+
 ## Status
 
 - [x] Layer 1 — PipeWire trap-sink routing, crash recovery, hotplug watch
@@ -99,6 +119,7 @@ on/off rather than treated as a fixed answer.
 - [x] Live end-to-end validation on real playback (BT sink; injected noise
       removed from output, speech passes, clean sink restore on exit)
 - [ ] Tray icon, autostart, first-run model download
+- [x] `.deb` packaging (`scripts/build_deb.sh`) — openly-licensed models bundled, ready to run after install
 - [ ] PyInstaller → AppImage packaging
 - [ ] Native LADSPA port (see docs/ARCHITECTURE.md Phase 3)
 

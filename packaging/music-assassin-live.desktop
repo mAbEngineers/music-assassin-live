@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Music Assassin Live
+Comment=System-wide realtime music removal
+Exec=/usr/bin/music-assassin-live
+Icon=music-assassin-live
+Terminal=false
+Categories=AudioVideo;Audio;

@@ -5,6 +5,12 @@ from pathlib import Path
 
 APP = "music-assassin"
 
+# Populated by scripts/build_deb.sh with the subset of models whose upstream
+# license permits redistribution (see models/README.md) — read-only, shared
+# across all users on the machine, so a .deb install works with zero
+# post-install steps for those models.
+SYSTEM_MODELS_DIR = Path("/usr/share/music-assassin-live/models")
+
 
 def data_dir() -> Path:
     base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
@@ -29,8 +35,18 @@ def models_dir() -> Path:
     local = Path(__file__).resolve().parent.parent / "models"
     if local.is_dir() and any(local.glob("*.onnx")):
         return local
+    if SYSTEM_MODELS_DIR.is_dir() and any(SYSTEM_MODELS_DIR.glob("*.onnx")):
+        return SYSTEM_MODELS_DIR
     xdg.mkdir(parents=True, exist_ok=True)
     return xdg
 
 
+def config_dir() -> Path:
+    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    d = base / APP
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 ROUTING_STATE = state_dir() / "routing.json"
+SETTINGS_FILE = config_dir() / "settings.json"
