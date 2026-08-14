@@ -1,6 +1,6 @@
 # Handover — current state
 
-Updated 2026-08-14. **This file is deliberately short.** It covers only where
+Updated 2026-08-15. **This file is deliberately short.** It covers only where
 things stand *right now* and what to do next. The plan, the reasoning, the
 measured findings and the list of dead ends all live in
 [`docs/ROADMAP.md`](docs/ROADMAP.md) — read that before re-deriving anything.
@@ -9,28 +9,35 @@ replaces it.)
 
 ## Where the code is
 
-`main` is at `06f0ac8` and **clean**. All work sits on branches. **Nothing has
-been pushed. Nothing has been merged.**
+**Merged to `main` on 2026-08-15.** Five of the six branches are in; `main` is
+at version 0.1.4 and green on the full offline suite (engine recovery, all five
+processors, routing dry, imports). **Nothing has been pushed. The 0.1.4 tag is
+deliberately not cut yet** — see next actions.
 
-| Branch | What it is | Ready to merge? |
+| Branch | What it is | State |
 |---|---|---|
-| `fix/stream-recovery` | 0.1.4 — `stream_ok`, callback crash containment, soft limiter, 300 % wet boost, `tests/test_engine_recovery.py` | Yes |
-| `feature/quality-harness` | `tests/bench_quality.py` — the quality measurement harness | Yes |
-| `fix/e2e-alignment` | `test_live_e2e.py` cross-correlation alignment + engine health counters | Yes |
-| `refactor/routing-backend` | `RoutingBackend` seam; engine decoupled from PipeWire | Yes |
-| `fix/dpdfnet-norm-init` | seeds DPDFNet state from ONNX metadata | Yes — **but read ROADMAP §2.2 first** |
-| `feature/windows-packaging` | installer scaffolding | No — app can't run on Windows yet |
-| `docs/roadmap` | `docs/ROADMAP.md` | Yes |
+| `fix/stream-recovery` | 0.1.4 — `stream_ok`, callback crash containment, soft limiter, 300 % wet boost, `tests/test_engine_recovery.py` | merged (`42fe75d`) |
+| `feature/quality-harness` | `tests/bench_quality.py` — the quality measurement harness | merged (`42fe75d`) |
+| `fix/e2e-alignment` | `test_live_e2e.py` cross-correlation alignment + engine health counters | merged (`42fe75d`) |
+| `refactor/routing-backend` | `RoutingBackend` seam; engine decoupled from PipeWire | merged (`92aeb0a`) |
+| `fix/dpdfnet-norm-init` | seeds DPDFNet state from ONNX metadata | merged (`9877b0c`) — **read ROADMAP §2.2** |
+| `docs/roadmap` | `docs/ROADMAP.md` | merged (`01f6acb`) |
+| `feature/windows-packaging` | installer scaffolding | **not merged** — app can't run on Windows yet (D3) |
 
-**Merge in dependency order:** `fix/stream-recovery` → `feature/quality-harness`
-→ `fix/e2e-alignment`. The harness imports `_soft_limit` from the engine and
-the e2e test imports `estimate_lag` from the harness. The other branches are
-independent of that chain.
+The pre-merge state is tagged `pre-merge-backup-20260815` (`06f0ac8`) if any of
+this needs to be unwound.
 
-All four code branches have been test-merged together and verified green
-(engine recovery, five processors offline, routing dry, imports). Two defects
-surfaced *only* by doing that and are already fixed — including one that git
-merged with **zero textual conflicts** because it was semantic, not textual.
+The first three branches were a **stack, not siblings** — `fix/e2e-alignment`
+already contained the other two, so one merge brought all three in order. (An
+earlier revision of this file and of ROADMAP §1.3 described them as a chain to
+be merged in sequence, and stated the sequence in opposite directions. Both are
+corrected; the underlying dependency is real — `bench_quality.py` imports
+`_soft_limit` from the engine, `test_live_e2e.py` imports `estimate_lag` from
+the harness — it just never required manual ordering.)
+
+Two defects had surfaced earlier from test-merging, and are already fixed —
+including one that git merged with **zero textual conflicts** because it was
+semantic, not textual.
 
 ## The one thing to read before touching model quality
 
@@ -50,28 +57,40 @@ Every previously-recorded suppression figure for this model is invalidated.
 
 ## Immediate next actions
 
-1. **Merge the branches** in the order above; rebuild the `.deb` (the one in
-   `dist/` predates all of this and was never verified). **Hold the 0.1.4 tag**
-   until item 2, so release notes don't quote numbers §2.2 just invalidated.
-2. **Redo the by-ear model comparison.** Now genuinely blocking — the current
-   default was chosen by ear against a misbehaving model, and all four
-   enhancers are within ~0.4 dB of each other.
-3. **Build a varied stereo corpus** for `bench_quality.py`. Everything measured
-   so far used one 15-second *mono* clip, which makes every mid/side result
-   meaningless by construction — there is no side channel to exploit. This
-   blocks the mid/side default decision. **Needs real source material.**
-4. Then Phase 2 in the roadmap: C1 gapless device switching (the originally
+1. **The by-ear model comparison (B1)** — the one thing gating the 0.1.4 tag,
+   and the only remaining Phase 1 item that needs a human rather than the
+   machine. The current default was chosen by ear against a misbehaving model,
+   and all four enhancers are within ~0.4 dB of each other. The stereo corpus
+   (ROADMAP §3.1) is built, so the same listening pass settles mid/side too.
+2. **Rebuild the `.deb`** from merged `main` — the one in `dist/` predates
+   everything. Then cut the 0.1.4 tag, once item 1 has confirmed what the
+   release notes should say about the default model.
+3. Then Phase 2 in the roadmap: C1 gapless device switching (the originally
    reported pain point), C2 volume forwarding.
+
+Worth reordering ahead of Phase 3 when you get there: the **stereo processor
+contract** (`wants_stereo`, engine stops downmixing) is currently buried inside
+A1, but three separate blocked items sit behind it — A1 (Spleeter crashes on
+mono input), B3 (the mono-output regression), and Q5 (whether mono is
+acceptable stops being a question once stereo is possible). It needs no input
+from anyone. Likewise Q3 does not really block the A1 spike: A1's own text says
+the spike should *produce* a latency-vs-quality curve, which is what answers
+Q3 — the ceiling only gates the final chunk-size pick.
 
 ## Open questions for the user
 
 Listed in full as ROADMAP §10. The ones that block work right now:
 
 - **Latency ceiling** — hard product constraint for the separator work (A1);
-  ~50–70 ms and ~500 ms lead to different designs.
-- **Stereo source material** for the corpus (item 3 above).
+  ~50–70 ms and ~500 ms lead to different designs. (Gates A1's *conclusion*,
+  not its start — see above.)
 - **Mono output while filtering** — currently total (−122 dB side-channel at
   100 % wet). Acceptable, or is stereo preservation required?
+
+~~Stereo source material for the corpus.~~ **Resolved 2026-08-15** — this was
+recorded as blocked on you across three handovers and it was not. There were 61
+usable full mixes in `~/Music/Acapella/`. Corpus built; see ROADMAP §3.1,
+including the trap that 7 of those "stereo" files are actually dual-mono.
 
 ## Environment notes
 
