@@ -49,7 +49,7 @@ def main():
     if real is None:
         routing.disable()
         raise SystemExit("no hardware sink available")
-    engine = AudioEngine(proc)
+    engine = AudioEngine(proc, routing)
     engine.set_bypass(args.bypass)
     engine.set_midside(args.midside)
     engine.set_bandlimit(not args.no_bandlimit)

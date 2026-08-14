@@ -390,7 +390,7 @@ class App:
                     "No hardware audio sink found (Bluetooth asleep?). "
                     "Play something / reconnect and try again.")
                 return
-            self.engine = AudioEngine(proc)
+            self.engine = AudioEngine(proc, self.routing)
             self.engine.set_intensity(self.mix_pct / 100.0)
             self.engine.set_volumes(wet=self._wet_boost(self.mix_pct))
             self.engine.set_midside(self.midside_enabled)
