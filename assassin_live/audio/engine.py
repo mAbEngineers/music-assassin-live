@@ -1,11 +1,14 @@
 """Layer 2 — streaming engine.
 
-One duplex PortAudio stream: capture = trap sink monitor, playback = real
-hardware sink. Targeting is two-layered: PULSE_SOURCE / PULSE_SINK env vars
-cover the case where PortAudio's "pulse" device reaches pipewire-pulse, but
-on Ubuntu 24.04 that device resolves to the PipeWire ALSA plugin which
-ignores them — so after the stream starts, routing.pin_process_streams()
-moves our stream nodes to the right targets with PipeWire metadata.
+One duplex PortAudio stream: capture = trap monitor, playback = real output
+device. Device targeting is delegated to a RoutingBackend (backends/base.py)
+in two steps — resolve_stream_devices() right before the stream opens,
+pin_stream() right after — because "point PortAudio at the right device"
+needs two passes on PipeWire (an env var a stream *usually* honors, then an
+explicit fix-up for when it doesn't; see backends/pipewire.py for why) and
+will need a wholly different mechanism again on Windows. AudioEngine only
+knows the two-step shape, not why either platform needs it — that keeps
+this module the "portable" layer the architecture doc promises.
 
 The audio callback only moves blocks between ring buffers; inference runs on
 a worker thread. If the worker falls behind, the callback emits the dry
@@ -24,6 +27,7 @@ import time
 import numpy as np
 
 from ..processors.base import StreamProcessor
+from .backends.base import RoutingBackend
 from .bandlimit import BandlimitFilter
 from .midside import MidSideFilter
 
@@ -41,24 +45,9 @@ class EngineStats:
         self.xruns = 0
 
 
-def _resolve_pulse_device():
-    import sounddevice as sd
-    for idx, dev in enumerate(sd.query_devices()):
-        if dev["name"] == "pulse":
-            return idx
-    return "default"
-
-
-def _reinit_portaudio():
-    """PortAudio reads PULSE_SOURCE/PULSE_SINK when it connects; force a
-    fresh connection after retargeting."""
-    import sounddevice as sd
-    sd._terminate()
-    sd._initialize()
-
-
 class AudioEngine:
-    def __init__(self, processor: StreamProcessor):
+    def __init__(self, processor: StreamProcessor, backend: RoutingBackend):
+        self._backend = backend
         self.stats = EngineStats()
         self._in_q: queue.Queue = queue.Queue(maxsize=8)
         self._out = np.zeros(0, dtype=np.float32)  # processed mono FIFO
@@ -169,9 +158,10 @@ class AudioEngine:
     def start(self, monitor_source: str, sink_name: str) -> None:
         import sounddevice as sd
 
-        os.environ["PULSE_SOURCE"] = monitor_source
-        os.environ["PULSE_SINK"] = sink_name
-        _reinit_portaudio()
+        # first targeting pass — see backend.resolve_stream_devices() for
+        # why this is platform-specific and why it isn't sufficient alone.
+        capture_dev, playback_dev = self._backend.resolve_stream_devices(
+            monitor_source, sink_name)
 
         self.proc.reset()
         self._midside.reset()
@@ -181,15 +171,15 @@ class AudioEngine:
         self._worker = threading.Thread(target=self._work, daemon=True)
         self._worker.start()
 
-        dev = _resolve_pulse_device()
         self._stream = sd.Stream(
-            device=(dev, dev), samplerate=SAMPLE_RATE, blocksize=BLOCK,
-            channels=2, dtype="float32", callback=self._callback)
+            device=(capture_dev, playback_dev), samplerate=SAMPLE_RATE,
+            blocksize=BLOCK, channels=2, dtype="float32",
+            callback=self._callback)
         self._stream.start()
 
-        from .routing import pin_process_streams
-        capture_sink = monitor_source.removesuffix(".monitor")
-        if not pin_process_streams(os.getpid(), capture_sink, sink_name):
+        # second targeting pass, once the stream (and its stream nodes)
+        # actually exist — see backend.pin_stream().
+        if not self._backend.pin_stream(os.getpid(), monitor_source, sink_name):
             print("warning: could not pin audio streams to their targets; "
                   "routing may be wrong (check pw-link -l)")
 

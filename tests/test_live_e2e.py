@@ -232,7 +232,7 @@ def bench_hardware(name, mdir, fixture, phases, work_dir: Path):
                 "Connect real audio hardware or a Bluetooth sink to run "
                 "this tier."}
 
-    engine = AudioEngine(proc)
+    engine = AudioEngine(proc, routing)
     engine.set_bypass(False)
     rec = None
     try:
