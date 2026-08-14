@@ -143,7 +143,60 @@ def _phase_db(y: np.ndarray, x: np.ndarray, phases: dict, scale: float = 1.0) ->
     return out
 
 
+def _phase_input_rms(x: np.ndarray, phases: dict, scale: float = 1.0) -> dict:
+    """Input level per phase, reported alongside every dB figure.
+
+    dpdfnet_hr's attenuation used to swing ~36 dB purely with input level
+    (see docs/ROADMAP.md §2.1) — a dB number with no level next to it is
+    therefore not interpretable on its own, and printing this would have
+    made a multi-hour investigation obvious at a glance. Kept even though
+    the norm-init fix (§2.2) flattened that swing to <=0.17 dB: the point
+    is that the reader can *see* the level, not that one model needed it.
+    """
+    out = {}
+    for label, (a, b) in phases.items():
+        ia, ib = int(a * scale), int(min(b * scale, len(x)))
+        if ib <= ia:
+            continue
+        out[label] = round(_rms(x[ia:ib]), 4)
+    return out
+
+
 # -- tier 1: offline --------------------------------------------------------
+
+def _feed_all(proc, x: np.ndarray, block: int) -> np.ndarray:
+    chunks = []
+    for i in range(0, len(x) - block, block):
+        y = proc.feed(x[i:i + block])
+        if len(y):
+            chunks.append(y)
+    return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+
+
+def _phase_db_fresh(proc, x: np.ndarray, phases: dict, scale: float = 1.0) -> dict:
+    """Same per-phase figures, but with the model state reset before each phase.
+
+    The continuous pass is the realistic one — the live app really does run
+    the model without interruption — but 19.3 dB of the music phase's measured
+    suppression comes purely from carry-over of the loud noise phase that
+    precedes it (docs/ROADMAP.md §2.1). That makes the continuous number mean
+    "how this model treats this content *after that intro*" rather than "how
+    this model treats this content". Reporting both separates the two.
+    """
+    block = int(proc.sample_rate * 0.020)
+    out = {}
+    for label, (a, b) in phases.items():
+        ia, ib = int(a * scale), int(min(b * scale, len(x)))
+        if ib - ia < block * 2:
+            continue
+        proc.reset()
+        seg = x[ia:ib]
+        y = _feed_all(proc, seg, block)
+        n = min(len(y), len(seg))
+        if n:
+            out[label] = round(_db(y[:n], seg[:n]), 1)
+    return out
+
 
 def bench_offline(name, mdir, fixture, phases):
     proc = processors.create(name, mdir)
@@ -153,14 +206,11 @@ def bench_offline(name, mdir, fixture, phases):
 
     proc.reset()
     block = int(proc.sample_rate * 0.020)
-    chunks = []
-    for i in range(0, len(x) - block, block):
-        y = proc.feed(x[i:i + block])
-        if len(y):
-            chunks.append(y)
-    y = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+    y = _feed_all(proc, x, block)
 
     result = {"name": name, "sr": proc.sample_rate, **_phase_db(y, x, phases, scale)}
+    result["input_rms"] = _phase_input_rms(x, phases, scale)
+    result["fresh_state"] = _phase_db_fresh(proc, x, phases, scale)
     onnx_name = processors.model_file(name)
     onnx = mdir / onnx_name if onnx_name else None
     if onnx and onnx.is_file():
@@ -356,6 +406,26 @@ def _print_offline_table(results, previous):
 
         print(f"  {r['name']:<16}{cell('music_only'):>14}{cell('noise_only'):>14}"
               f"{cell('music_speech'):>16}  {r.get('weights_sha256', '?')}")
+
+        # Same phases from a reset state. Where this differs sharply from the
+        # row above, the difference is state carry-over, not the content.
+        fresh = r.get("fresh_state") or {}
+        if fresh:
+            def fcell(label, fresh=fresh):
+                v = fresh.get(label)
+                return f"{'--':>10}" if v is None else f"{v:>6.1f} dB"
+            print(f"  {'  fresh state':<16}{fcell('music_only'):>14}"
+                  f"{fcell('noise_only'):>14}{fcell('music_speech'):>16}")
+
+    # Input level per phase — a property of the fixture, not of any model, so
+    # print it once. Every dB figure above is relative to these.
+    rms = next((r["input_rms"] for r in results if r.get("input_rms")), None)
+    if rms:
+        def rcell(label):
+            v = rms.get(label)
+            return f"{'--':>10}" if v is None else f"{v:>9.4f}"
+        print(f"\n  {'input RMS':<16}{rcell('music_only'):>14}{rcell('noise_only'):>14}"
+              f"{rcell('music_speech'):>16}")
 
 
 def _print_hardware_table(results):
