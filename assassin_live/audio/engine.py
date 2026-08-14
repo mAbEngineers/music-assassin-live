@@ -46,7 +46,14 @@ class EngineStats:
 
 
 class AudioEngine:
-    def __init__(self, processor: StreamProcessor, backend: RoutingBackend):
+    def __init__(self, processor: StreamProcessor,
+                 backend: RoutingBackend | None = None):
+        # Optional because the backend is only ever consulted by start() --
+        # the audio path (callback, wet/dry mix, limiter) is pure signal
+        # processing that has nothing to say about device targeting. Making
+        # it mandatory would mean no engine can be constructed without a
+        # working platform routing backend, which needlessly couples the two
+        # and makes the processing path untestable on its own.
         self._backend = backend
         self.stats = EngineStats()
         self._in_q: queue.Queue = queue.Queue(maxsize=8)
@@ -157,6 +164,12 @@ class AudioEngine:
 
     def start(self, monitor_source: str, sink_name: str) -> None:
         import sounddevice as sd
+
+        if self._backend is None:
+            raise RuntimeError(
+                "AudioEngine.start() needs a RoutingBackend; construct it as "
+                "AudioEngine(processor, backend). It is optional only for "
+                "callers that never stream (offline processing, tests).")
 
         # first targeting pass — see backend.resolve_stream_devices() for
         # why this is platform-specific and why it isn't sufficient alone.
