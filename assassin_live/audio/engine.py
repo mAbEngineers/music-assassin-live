@@ -31,6 +31,23 @@ SAMPLE_RATE = 48000
 BLOCK = 960          # 20 ms
 XFADE_BLOCKS = 1     # gain ramp spread over one block == 20 ms
 
+LIMITER_THRESHOLD = 0.8  # below this, output passes through untouched
+LIMITER_CEILING = 0.98   # peaks above threshold compress toward this, never past it
+
+
+def _soft_limit(x: np.ndarray) -> np.ndarray:
+    """Memoryless soft-knee limiter: a no-op below LIMITER_THRESHOLD, and a
+    smooth tanh compression from there up to LIMITER_CEILING for anything
+    louder — so boosting wet gain can't send a hard-clipped (or >1.0)
+    signal to the speaker, but normal-level audio is never colored."""
+    mag = np.abs(x)
+    over = mag > LIMITER_THRESHOLD
+    if not np.any(over):
+        return x
+    span = LIMITER_CEILING - LIMITER_THRESHOLD
+    compressed = LIMITER_THRESHOLD + span * np.tanh((mag - LIMITER_THRESHOLD) / span)
+    return np.where(over, np.sign(x) * compressed, x)
+
 
 class EngineStats:
     def __init__(self):
@@ -39,6 +56,7 @@ class EngineStats:
         self.overflows = 0
         self.worker_ms_avg = 0.0
         self.xruns = 0
+        self.callback_errors = 0   # exception in _callback -> would silently kill the stream
 
 
 def _resolve_pulse_device():
@@ -133,6 +151,14 @@ class AudioEngine:
         live waveform/level meter."""
         return list(self._levels)
 
+    @property
+    def stream_ok(self) -> bool:
+        """False if the underlying PortAudio stream died silently — e.g. an
+        uncaught callback exception or the device disappearing mid-stream
+        both leave it inactive with no error surfaced, so the caller must
+        poll this rather than wait for an exception."""
+        return self._stream is not None and self._stream.active
+
     def set_intensity(self, intensity: float) -> None:
         """Music-removal intensity: 0.0 = fully original, 1.0 = fully processed."""
         self._wet_target = float(np.clip(intensity, 0.0, 1.0))
@@ -224,6 +250,18 @@ class AudioEngine:
             self.stats.xruns += 1
         self.stats.blocks_in += 1
         try:
+            self._callback_body(indata, outdata, frames)
+        except Exception:  # noqa: BLE001 — sounddevice silently kills the
+            # whole stream on any exception out of this callback (it goes
+            # inactive with no error surfaced to the app — the GUI keeps
+            # showing "on" with no audio, needing a manual off/on to
+            # recover). Never let that happen: fall back to plain dry
+            # passthrough for this block and keep the stream alive.
+            self.stats.callback_errors += 1
+            outdata[:] = indata
+
+    def _callback_body(self, indata, outdata, frames) -> None:
+        try:
             self._in_q.put_nowait(indata.copy())
             self._dry_out = np.concatenate([self._dry_out, indata])
             if len(self._dry_out) > self._max_out:
@@ -269,7 +307,8 @@ class AudioEngine:
             ramp = g0
         dry_g = 0.0 if self._mute_dry else self._dry_volume
         wet_g = 0.0 if self._mute_wet else self._wet_volume
-        outdata[:] = dry * dry_g * (1.0 - ramp) + wet * wet_g * ramp
+        mixed = dry * dry_g * (1.0 - ramp) + wet * wet_g * ramp
+        outdata[:] = _soft_limit(mixed) if wet_g > 1.0 else mixed
         self._levels.append(float(np.sqrt(np.mean(np.square(outdata)))))
 
     def _work(self) -> None:

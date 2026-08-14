@@ -264,7 +264,7 @@ class App:
         self._style_mute_btn(self.wet_mute_btn, self.mute_wet)
 
         self.mix_slider = HSlider(card, width=340, height=26, color=RED, track=TRACK,
-                                  bg=PANEL, value=self.mix_pct, minv=0, maxv=150,
+                                  bg=PANEL, value=self.mix_pct, minv=0, maxv=300,
                                   markers=(50, 100), marker_color=SUBTEXT,
                                   command=self._on_mix_change)
         self.mix_slider.pack(padx=14, pady=(6, 2))
@@ -276,7 +276,9 @@ class App:
     @staticmethod
     def _wet_boost(mix_pct: float) -> float:
         # past 100% the crossfade is already fully wet; extra travel boosts
-        # wet gain instead, up to 1.5x, to offset post-processing loudness loss
+        # wet gain instead, up to 3x (+9.5 dB) at 300%, to offset
+        # post-processing loudness loss. engine._soft_limit keeps this from
+        # ever clipping/overdriving the output.
         return 1.0 + max(0.0, mix_pct - 100.0) / 100.0
 
     def _on_mix_change(self, value):
@@ -435,6 +437,20 @@ class App:
     # -- supervision -------------------------------------------------------------
     def _tick(self):
         if self.enabled and self.engine:
+            if not self.engine.stream_ok:
+                # PortAudio stream died silently (uncaught callback
+                # exception or the device vanishing) — the button would
+                # otherwise keep showing "on" with no audio flowing until
+                # manually toggled. Try the same recovery as a real
+                # sink change; only give up and turn off if that fails too.
+                try:
+                    self.engine.retarget(self.routing.monitor_source,
+                                         self.routing.real.name)
+                    self.status.config(text="audio stream recovered automatically")
+                except Exception as e:  # noqa: BLE001 — see retarget handling below
+                    self._turn_off()
+                    self.status.config(text=f"audio stream died, restart failed: {e}")
+                return
             event = self.routing.check()
             if event == "real_sink_changed" and self.routing.real:
                 try:
