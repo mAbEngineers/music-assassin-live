@@ -58,6 +58,17 @@ def main():
     try:
         while True:
             time.sleep(1)
+            if not engine.stream_ok:
+                # stream died silently (uncaught callback exception or the
+                # device vanishing) -- try the same recovery as a real
+                # sink change before giving up.
+                try:
+                    engine.retarget(routing.monitor_source, routing.real.name)
+                    print("\naudio stream recovered automatically")
+                except Exception as e:  # noqa: BLE001
+                    print(f"\naudio stream died, restart failed, stopping: {e}")
+                    break
+                continue
             event = routing.check()
             if event == "real_sink_changed" and routing.real:
                 try:

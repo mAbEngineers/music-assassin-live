@@ -58,6 +58,14 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 # add real headphones/speakers to also validate the live audio path.
 .venv/bin/python tests/test_live_e2e.py
 
+# quantitative de-musicing quality: builds ground-truth vocal/music stems
+# with an offline separator (once), then scores any model/filter/mix
+# combination against them — no audio hardware needed, fully repeatable,
+# meant for comparing configs, not just pass/fail. See the module docstring.
+.venv/bin/python tests/bench_quality.py --build-refs your_clip.wav
+.venv/bin/python tests/bench_quality.py --sweep model=dpdfnet_hr,gtcrn,dtln \
+                                        --sweep midside=off,on
+
 # run
 .venv/bin/python -m assassin_live               # GUI toggle window
 .venv/bin/python -m assassin_live --headless    # terminal mode, Ctrl-C stops
