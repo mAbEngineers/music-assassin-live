@@ -49,34 +49,51 @@ Don't re-run that research.
   (`a33f1e4`), ONNX thread over-subscription burning 100 W+ idle (`ae88ab3`),
   retarget debounce, stale-queue drain.
 
-### 1.3 Built but not committed (working tree, right now)
+### 1.3 Committed, on branches, not merged and not pushed
 
-**0.1.4 — stream auto-recovery + soft limiter** (`engine.py`, `ui/app.py`,
-`__main__.py`, `__init__.py` version bump).
-Targets a crash class hit twice in live testing: PortAudio silently kills the
-stream on an uncaught callback exception, GUI keeps showing "ON" with dead
-audio. Adds `AudioEngine.stream_ok`, polled every tick by both GUI and
-headless loop with automatic `retarget()` recovery; wraps `_callback()` in
-try/except with dry passthrough as the per-block fallback; adds `_soft_limit()`
-(tanh above 0.8, ceiling 0.98) so the mix slider's extended 300 % wet boost
-can't clip.
+The working tree that had blocked three sessions is committed. `main` is
+untouched at `06f0ac8`. Nothing has been pushed.
 
-Verified: compiles, limiter math correct. **Not verified: an actual
-crash-and-recover cycle, and no regression pass has been run against this diff.**
+| Branch | What it is | Ready? |
+|---|---|---|
+| `fix/stream-recovery` | 0.1.4: `stream_ok`, callback try/except, soft limiter, 300 % wet boost, `tests/test_engine_recovery.py` | Yes — tested, suite green |
+| `feature/quality-harness` | `tests/bench_quality.py` + README quickstart | Yes |
+| `fix/e2e-alignment` | `test_live_e2e.py` cross-correlation alignment + engine health counters | Yes |
+| `refactor/routing-backend` | `RoutingBackend` protocol + `PipeWireBackend`; engine decoupled from PipeWire | Yes — dry test green |
+| `fix/dpdfnet-norm-init` | seed DPDFNet state from ONNX metadata (§2.2) | Yes — but read §2.2 first, it changes the model's behaviour |
+| `feature/windows-packaging` | installer scaffolding, `.ico`, `build_windows.bat`, `.gitignore` rule | No — see D3 |
+| `docs/roadmap` | this document | Yes |
 
-`dist/music-assassin-live_0.1.4_amd64.deb` was built from this uncommitted
-tree — the artifact is ahead of git history and has not been re-verified.
+**Merge order matters** — the first three are a dependency chain
+(`fix/e2e-alignment` → `feature/quality-harness` → `fix/stream-recovery`),
+because `bench_quality.py` imports `_soft_limit` from the engine and
+`test_live_e2e.py` imports `estimate_lag` from the harness. `refactor/routing-backend`
+is independent of that chain but touches `engine.py`, `ui/app.py` and
+`__main__.py`.
 
-### 1.4 Built but untracked (Windows packaging scaffolding)
+All four code branches have been **test-merged together and verified green**
+(engine recovery, all five processors offline, routing dry, imports). Two
+defects were found only by doing that and are already fixed:
 
-`packaging/windows/{music-assassin-live.iss, README.md,
-vb-audio-permission-email.md, vendor/.gitkeep}`,
-`packaging/icons/music-assassin-live.ico`, `scripts/build_windows.bat`.
+- `AudioEngine(processor, backend)` was made a required argument by the
+  routing refactor, which broke `test_engine_recovery.py`. Git merged it with
+  **zero textual conflicts** — a semantic break git cannot see. `backend` is
+  now optional, enforced in `start()` where it actually applies.
+- The 0.1.4 work was verified for the first time: the callback-crash
+  containment, `stream_ok` reporting and limiter guarantees all now have a
+  permanent test that needs no audio hardware.
 
-Nothing here has been run, compiled, or committed. **The blocker is not the
-installer** — `assassin_live/audio/routing.py` only speaks PipeWire, so there
-is no WASAPI capture path and no way to set VB-CABLE as default output. The
-packaged app would not function on Windows today. See §7.
+`dist/music-assassin-live_0.1.4_amd64.deb` still predates all of this and has
+never been re-verified — rebuild before trusting it.
+
+### 1.4 Windows packaging — committed to its own branch
+
+On `feature/windows-packaging`. Deliberately not on `main`: **the blocker is
+not the installer** — `routing.py` spoke only PipeWire, so there was no WASAPI
+capture path and no way to set VB-CABLE as default output; a packaged app
+would not have run. `refactor/routing-backend` now provides the seam
+(D2 below), so the remaining work is a real Windows backend (D3). Nothing in
+this branch has been run or compiled. See §7.
 
 ---
 
@@ -102,6 +119,88 @@ feature. This has three consequences that drive the whole roadmap:
 3. **A realtime source separator is not one option among three. It is the
    only path to the product promise.** Everything else on this roadmap makes
    the app good; this is what makes it *work*.
+
+### 2.1 One important qualification — `dpdfnet_hr` is level-dependent
+
+Measured 2026-08-14. The default model does **not** have a single
+characteristic suppression figure, because its behaviour changes with input
+level far more than any other shipped model:
+
+| input RMS | `dpdfnet_hr` music | `gtcrn` music | `speechdenoiser` music |
+|---|---|---|---|
+| 0.01 | **−29.9 dB** | −1.0 | −1.4 |
+| 0.05 | **−4.6 dB** | −0.6 | −1.2 |
+| 0.1 | **−1.3 dB** | −0.7 | −1.3 |
+| 0.5 | **−1.2 dB** | −2.6 | −1.7 |
+
+~36 dB of swing, against ~2 dB for the others across the same three orders of
+magnitude. A single gain multiplier on the unmodified regression fixture
+reproduces the whole thing (×1 → −30.2 dB, ×8 → −1.3 dB).
+
+**Root cause**, verified in the model files: both DPDFNet exports carry
+`erb_norm_init` + `spec_norm_init` feature-normalization calibration in ONNX
+custom metadata (hr: 481 + 96 floats). `processors/dpdfnet.py`'s `reset()`
+does `np.zeros(state_size)` and discards it. Its own docstring acknowledged
+this but judged it "a brief over/under-suppression transient… acceptable…
+fix if it ever matters" — that assessment was **wrong**: it produces level-
+and history-dependence, not a transient. `gtcrn`/`speechdenoiser`/`dtln` carry
+no such metadata, which is exactly why only DPDFNet misbehaves. Fix in
+progress on `fix/dpdfnet-norm-init` (A5).
+
+Separately quantified: **19.3 dB** of extra music suppression comes purely
+from state carryover (3 s of loud noise preceding the music phase). Real, but
+it applies to every measurement path equally, so it is a confound that makes
+`bench_offline`'s figures hard to interpret — not an explanation for any
+path-to-path difference.
+
+### 2.2 A5 landed — and it overturns what we believed about the default model
+
+`fix/dpdfnet-norm-init` seeds the state correctly (layout taken from
+sherpa-onnx's `GetInitState()`: `erb_norm_init` at offset 0, `spec_norm_init`
+at `erb_norm_state_size`, zeros elsewhere). It works — the level swing
+collapses from ~36 dB to **≤0.17 dB**:
+
+| input RMS | before | after |
+|---|---|---|
+| 0.001 | −37.0 dB | −0.72 dB |
+| 0.01 | −29.9 dB | −0.70 dB |
+| 0.1 | −1.3 dB | −0.71 dB |
+| 0.5 | −1.2 dB | −0.87 dB |
+
+**The uncomfortable part: the −30 dB was never music removal.** It was
+indiscriminate over-suppression caused by the mis-seeded normalizer. Measured
+after the fix, vocals-alone vs music-alone at matched level:
+
+| model | vocals | music | separation |
+|---|---|---|---|
+| `dpdfnet_hr` | −0.28 dB | −1.11 dB | **0.83 dB** |
+| `gtcrn` | −0.21 dB | −1.03 dB | **0.83 dB** |
+| `speechdenoiser` | −0.66 dB | −1.61 dB | 0.95 dB |
+| `dtln` | −0.10 dB | −1.30 dB | 1.20 dB |
+
+`dpdfnet_hr` discriminates vocals from music exactly as well as `gtcrn` —
+i.e. barely, and slightly worse than `dtln`. **This disproves the standing
+belief** (recorded in project memory since 2026-07-24) that `dpdfnet_hr` "may
+actually be doing real music-vs-voice separation rather than generic noise
+suppression, which would partially resolve the open research problem." It was
+not. §2's finding therefore stands *unqualified*: no shipped model removes
+music, all four are ~1 dB separators, and A1 is the only path.
+
+**Practical impact is smaller than the table implies.** The dramatic change is
+at low input levels; at realistic listening levels (RMS 0.05–0.1) the model
+was already only giving −1.3 to −4.6 dB. The fix's real user-visible effect is
+that *quiet* passages stop being crushed — a genuine improvement, just not the
+one the numbers first suggest.
+
+**Consequences.**
+- Keep `dpdfnet_hr` as default, but for the correct reason: it is 48 kHz-native,
+  so it avoids the resample round-trip and preserves high frequencies
+  (measured: −4.0 dB in the 8–20 kHz band vs `gtcrn`'s −49.0 dB). Not because
+  it removes music better — it does not.
+- **The by-ear model comparison must be redone.** The 2026-07-24 listening
+  judgement that picked this default was made against the broken model.
+- Any future model comparison must control for input level, or it measures the
+  fixture's gain staging rather than the model.
 
 ---
 
@@ -228,6 +327,37 @@ is `UVR_MDXNET_KARA_2` — RTF ~0.84, 2.8 GB. Not realtime, not shippable.
 Keep on the research side; revisit only if a fast instrumental-prediction model
 appears.
 
+### A5. Seed DPDFNet state from its ONNX normalization metadata ✅ done
+
+The defect behind §2.1. `processors/dpdfnet.py` starts the model state from
+zeros, discarding the `erb_norm_init`/`spec_norm_init` calibration both DPDFNet
+exports ship in their ONNX metadata. Fix: read the metadata and seed the flat
+state vector at the correct offsets (sherpa-onnx does exactly this — port its
+layout), falling back to zeros for models without it.
+
+Done on `fix/dpdfnet-norm-init` (1 commit, not merged). Layout taken from
+sherpa-onnx's own `GetInitState()` rather than inferred. Falls back to zeros
+for models without the metadata, so `gtcrn`/`speechdenoiser`/`dtln` are
+provably unchanged (verified byte-identical output before/after). All five
+processors still pass `test_processors_offline.py`.
+
+Results and their consequences are in §2.2 — read that before acting on any
+older suppression number for this model, because the fix invalidates them all.
+
+### A6. Report input level in `bench_offline()`
+
+`tests/test_live_e2e.py`'s offline tier prints a dB attenuation per phase with
+no indication of the input level that produced it. For `dpdfnet_hr` the level
+matters more than anything else being measured (§2.1), and printing the per-
+phase input RMS alongside the figure would have made a multi-hour
+investigation obvious at a glance. Cheap, and it stops the same confusion
+recurring.
+
+Consider also reporting a fresh-state variant per phase alongside the
+continuous one: the live app genuinely does process continuously, so
+carry-over is realistic — but 19.3 dB of it makes a per-phase number mean
+something other than "how the model treats this content".
+
 ---
 
 ## 5. Workstream B — De-musicing quality: pre/post filters
@@ -337,6 +467,18 @@ second-most visible integration wart after C1.
 
 Fix: pin the trap sink at 100 % and mirror volume/mute changes onto the real
 hardware sink.
+
+**Promoted 2026-08-14 — this is no longer only a UX wart, it is a suspected
+measurement confound.** Given §2.1 (the default model's output depends heavily
+on input level), an unpinned trap-sink volume means the system volume slider
+silently changes what the model is fed, and therefore what every hardware-tier
+measurement reports. That independently explains why `test_live_e2e.py`'s
+hardware tier recorded `noise_only` swinging **−55.7 → −21.7 dB across two
+identical runs** — an uncontrolled variable, not model nondeterminism. Until
+this is fixed the hardware tier has a free variable in it and its absolute
+numbers should not be compared across runs. Caveat: reproducing the full
+offline-vs-hardware gap needed ~+18–30 dB, more than typical OS volume range,
+so this is likely one contributor among several rather than the whole story.
 
 ### C3. Stop fighting the system output picker
 
@@ -492,10 +634,11 @@ entry ticket to a Windows APO later. Not near-term.
   Leading hypothesis, untested: `dpdfnet_hr` is level-sensitive (enhancers
   are commonly trained at particular input levels) and the two paths present
   it with different levels. Next step is a level sweep through both paths
-  before trusting either number. Until then **the default model's absolute
-  suppression figures should not be quoted**, though its by-ear selection
-  still stands on the separate finding that it retains vocals best
-  (−2.2 dB on a vocals-only probe vs −10.9 dB on music).
+  before trusting either number. **Resolved 2026-08-14 — see §2.1/§2.2:** the
+  cause was a real defect (discarded ONNX normalization metadata), now fixed
+  on `fix/dpdfnet-norm-init`. The hardware tier still has one uncontrolled
+  variable left in it, though — the unpinned trap-sink volume (C2) — so its
+  absolute numbers should not be compared across runs until that is fixed.
 - **E3. Resolve `speechdenoiser`'s license** (upstream has no license file) or
   re-export from dual-licensed DeepFilterNet3. Until then it must not ship as
   a release asset — local dev only.
@@ -510,27 +653,42 @@ entry ticket to a Windows APO later. Not near-term.
 
 ## 9. Sequenced plan
 
-### Phase 1 — Clear the tree (days)
+### Phase 1 — Clear the tree ✅ mostly done
 
-Nothing large should start while three sessions' worth of work sits
-uncommitted.
+1. ~~Test 0.1.4 stream recovery; run the regression suite; commit.~~ Done —
+   `fix/stream-recovery`, with a permanent hardware-free test.
+2. ~~Get the Windows scaffolding out of the shared tree.~~ Done —
+   `feature/windows-packaging` (one branch per change, see D1).
+3. ~~Fix the hardware tier's alignment.~~ Done — `fix/e2e-alignment` (E2).
+4. ~~Extract the routing backend seam.~~ Done — `refactor/routing-backend` (D2).
+5. ~~Root-cause the `dpdfnet_hr` measurement contradiction.~~ Done — it was a
+   real defect, fixed on `fix/dpdfnet-norm-init` (§2.1, §2.2, A5).
 
-1. Test 0.1.4 stream recovery against a forced crash; run the full regression
-   suite; commit to `main`. *(§1.3)*
-2. Create `platform/windows`, move the untracked packaging files there,
-   commit. `main` returns to clean. *(D1, D6)*
-3. **B1 — by-ear A/B of mid/side on vs. off, and DTLN vs. dpdfnet_hr.** Zero
-   code, and it decides two shipped-but-unevaluated defaults. *(B1)*
-4. Re-verify or rebuild the 0.1.4 `.deb`; tag and release. *(E4)*
+**Remaining in this phase:**
+
+6. **Merge the branches to `main`** in dependency order and rebuild the `.deb`
+   (E4). Hold the 0.1.4 tag until item 7, so release notes don't describe the
+   default model using numbers §2.2 just invalidated.
+7. **Redo the by-ear model comparison (B1).** Now genuinely blocking: the
+   existing default was chosen by ear against a model that was misbehaving, and
+   §2.2 shows all four enhancers are within ~0.4 dB of each other on
+   vocal/music separation. Needs the stereo corpus (below) to also settle
+   mid/side.
+8. **Build a varied stereo corpus** for `bench_quality.py`. Everything measured
+   so far used one 15-second *mono* clip, which makes every mid/side result
+   meaningless by construction — no side channel exists to exploit. Blocks B1
+   and B2. Needs real source material.
 
 ### Phase 2 — Make it feel like a product (1–2 weeks)
 
-5. **C1 — gapless output switching.** The named pain point. Start with the
+9. **C1 — gapless output switching.** The named pain point. Start with the
    live-`pw-metadata`-retarget spike.
-6. **C2 — volume-key forwarding.**
-7. **C3 — coherent system-picker behavior**, **C4 — human status line.**
-8. **D2 — routing backend interface** (small; unblocks Windows cleanly).
-9. **E1 — CI.**
+10. **C2 — volume-key forwarding.** Promoted: it is now a suspected
+    measurement confound, not only a UX wart (see C2).
+11. **A6 — report input RMS in `bench_offline()`.** Small, and it prevents a
+    repeat of the §2.1 investigation.
+12. **C3 — coherent system-picker behavior**, **C4 — human status line.**
+13. **E1 — CI** (scoped smaller than it looks; see E1).
 
 ### Phase 3 — Make it actually remove music (weeks)
 
@@ -601,3 +759,39 @@ prefilter, which removes the side channel by design.
 - **Synthetic tones as a music test fixture.** They get suppressed like noise
   (−47 dB), contradicting real music's −0.4 to −1.7 dB. `test_live_e2e.py`
   already guards against this; don't reintroduce it.
+
+### Eliminated while chasing the `dpdfnet_hr` contradiction (§2.1)
+
+All measured, all negative — do not re-investigate:
+
+- **Alignment** as the cause of the offline/hardware gap: aligned and
+  unaligned per-phase figures agree within 0.1 dB.
+- **Dry fallback**: 0.1 % (1/1050 blocks), 0 xruns, 0 callback errors. A
+  re-read of `_callback_body()` confirms the only path putting dry samples
+  into `wet[]` is the one that already increments `fallback_blocks`, so there
+  is no uncounted path and the counter can be trusted.
+- **Mono downmix** (`block.mean(axis=1)`): an exact no-op on a
+  duplicated-channel signal, bit-for-bit.
+- **Band-limit filter**: a real effect, but ~5 dB and in the *wrong
+  direction* (more suppression, not less) — far too small and backwards to
+  explain the gap.
+- **State carryover** as the explanation for the gap: real and large
+  (19.3 dB), but it applies identically to both measurement paths, so it
+  cannot account for a difference between them. It remains a genuine confound
+  for interpreting any single `bench_offline` number (see A6).
+- **Phase/drift swap**: output length deficits are <1000 samples for every
+  processor.
+
+### Claims that did not survive re-measurement
+
+- **"dpdfnet_hr does real music-vs-voice separation."** Believed since
+  2026-07-24 on the strength of its −30 dB music figure. Disproven in §2.2:
+  that figure was an artifact of the mis-seeded normalizer, and once fixed the
+  model separates vocals from music by 0.83 dB — the same as `gtcrn`.
+- **"A direct-engine run at 20 ms pacing gives music_only −26.8 dB."**
+  Recorded in project memory; could not be reproduced. A faithful
+  re-measurement of the engine chain including the band-limit gave ≈ −36 dB.
+  Treat −26.8 as unverified.
+- **"The hardware tier specifically can't be trusted for dpdfnet_hr."** Half
+  right for the wrong reason. That tier did have a real alignment bug (E2, now
+  fixed), but the offline/hardware divergence was input level, not the tier.
