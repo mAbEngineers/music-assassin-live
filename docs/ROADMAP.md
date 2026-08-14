@@ -49,31 +49,40 @@ Don't re-run that research.
   (`a33f1e4`), ONNX thread over-subscription burning 100 W+ idle (`ae88ab3`),
   retarget debounce, stale-queue drain.
 
-### 1.3 Committed, on branches, not merged and not pushed
+### 1.3 Merged to `main` 2026-08-15 — not pushed, not tagged
 
-The working tree that had blocked three sessions is committed. `main` is
-untouched at `06f0ac8`. Nothing has been pushed.
+The working tree that had blocked three sessions is committed *and merged*.
+`main` is at 0.1.4 and green on the full offline suite. Nothing has been
+pushed; the 0.1.4 tag is deliberately held (§9, Phase 1).
 
-| Branch | What it is | Ready? |
+| Branch | What it is | State |
 |---|---|---|
-| `fix/stream-recovery` | 0.1.4: `stream_ok`, callback try/except, soft limiter, 300 % wet boost, `tests/test_engine_recovery.py` | Yes — tested, suite green |
-| `feature/quality-harness` | `tests/bench_quality.py` + README quickstart | Yes |
-| `fix/e2e-alignment` | `test_live_e2e.py` cross-correlation alignment + engine health counters | Yes |
-| `refactor/routing-backend` | `RoutingBackend` protocol + `PipeWireBackend`; engine decoupled from PipeWire | Yes — dry test green |
-| `fix/dpdfnet-norm-init` | seed DPDFNet state from ONNX metadata (§2.2) | Yes — but read §2.2 first, it changes the model's behaviour |
-| `feature/windows-packaging` | installer scaffolding, `.ico`, `build_windows.bat`, `.gitignore` rule | No — see D3 |
-| `docs/roadmap` | this document | Yes |
+| `fix/stream-recovery` | 0.1.4: `stream_ok`, callback try/except, soft limiter, 300 % wet boost, `tests/test_engine_recovery.py` | merged `42fe75d` |
+| `feature/quality-harness` | `tests/bench_quality.py` + README quickstart | merged `42fe75d` |
+| `fix/e2e-alignment` | `test_live_e2e.py` cross-correlation alignment + engine health counters | merged `42fe75d` |
+| `refactor/routing-backend` | `RoutingBackend` protocol + `PipeWireBackend`; engine decoupled from PipeWire | merged `92aeb0a` |
+| `fix/dpdfnet-norm-init` | seed DPDFNet state from ONNX metadata (§2.2) | merged `9877b0c` — read §2.2, it changes the model's behaviour |
+| `docs/roadmap` | this document | merged `01f6acb` |
+| `feature/windows-packaging` | installer scaffolding, `.ico`, `build_windows.bat`, `.gitignore` rule | **not merged** — see D3 |
 
-**Merge order matters** — the first three are a dependency chain
-(`fix/e2e-alignment` → `feature/quality-harness` → `fix/stream-recovery`),
-because `bench_quality.py` imports `_soft_limit` from the engine and
-`test_live_e2e.py` imports `estimate_lag` from the harness. `refactor/routing-backend`
-is independent of that chain but touches `engine.py`, `ui/app.py` and
-`__main__.py`.
+Pre-merge state is tagged `pre-merge-backup-20260815` (`06f0ac8`).
 
-All four code branches have been **test-merged together and verified green**
-(engine recovery, all five processors offline, routing dry, imports). Two
-defects were found only by doing that and are already fixed:
+**On the "merge order" this section used to prescribe:** the first three
+branches were a *stack*, not siblings — `fix/e2e-alignment` already contained
+`feature/quality-harness`, which already contained `fix/stream-recovery`. One
+merge took all three, in order, with no manual sequencing. The underlying
+dependency is real (`bench_quality.py` imports `_soft_limit` from the engine,
+`test_live_e2e.py` imports `estimate_lag` from the harness) but it was already
+expressed in the commit graph. Earlier revisions of this section and of
+`HANDOVER.md` also stated the sequence in **opposite directions**, so anyone
+following one of them literally would have merged backwards. Fixed here for the
+record. `refactor/routing-backend` was independent of that stack but touches
+`engine.py`, `ui/app.py` and `__main__.py`; it merged clean.
+
+All four code branches had been **test-merged and verified green** before the
+real merge (engine recovery, all five processors offline, routing dry,
+imports), and the real merge reproduced that result. Two defects were found
+only by doing that and are already fixed:
 
 - `AudioEngine(processor, backend)` was made a required argument by the
   routing refactor, which broke `test_engine_recovery.py`. Git merged it with
@@ -186,17 +195,42 @@ suppression, which would partially resolve the open research problem." It was
 not. §2's finding therefore stands *unqualified*: no shipped model removes
 music, all four are ~1 dB separators, and A1 is the only path.
 
-**Practical impact is smaller than the table implies.** The dramatic change is
-at low input levels; at realistic listening levels (RMS 0.05–0.1) the model
-was already only giving −1.3 to −4.6 dB. The fix's real user-visible effect is
-that *quiet* passages stop being crushed — a genuine improvement, just not the
-one the numbers first suggest.
+**Practical impact on the *music* path is smaller than the table implies.** The
+dramatic change is at low input levels; at realistic listening levels
+(RMS 0.05–0.1) the model was already only giving −1.3 to −4.6 dB.
+
+### 2.3 …but the fix is a much bigger win than §2.2 first concluded
+
+Measured 2026-08-15 on merged `main`, offline tier, against the stored
+2026-08-14 pre-fix report. The models that carry no ONNX norm metadata are the
+control, and they are **unchanged to the decimal** — which is what establishes
+that the fix touched DPDFNet and nothing else:
+
+| model | phase | before | after | delta |
+|---|---|---|---|---|
+| `dpdfnet_hr` | noise_only | −10.8 dB | **−59.5 dB** | −48.7 |
+| `dpdfnet` | noise_only | −44.1 dB | **−71.7 dB** | −27.6 |
+| `dpdfnet_hr` | music_only | −30.2 dB | −0.3 dB | +29.9 |
+| `gtcrn` / `dtln` / `speechdenoiser` | all three | — | — | **±0.0** |
+
+§2.2 characterised the fix's user-visible effect as "quiet passages stop being
+crushed." That understated it. The same defect that manufactured the fake music
+suppression was also **crippling the model at its actual job**: `dpdfnet_hr`
+was the *worst* noise suppressor of the five (−10.8 dB, worse than every other
+model, which is why its own noise score looked anomalous back in July), and is
+now second only to `dpdfnet`. Both DPDFNet variants got substantially better at
+denoising.
+
+So the fix trades away a suppression figure that was never real for a large
+gain in the thing the model is genuinely for. That is a clear net win — it just
+isn't a win on the music axis, which remains A1's problem alone.
 
 **Consequences.**
-- Keep `dpdfnet_hr` as default, but for the correct reason: it is 48 kHz-native,
-  so it avoids the resample round-trip and preserves high frequencies
-  (measured: −4.0 dB in the 8–20 kHz band vs `gtcrn`'s −49.0 dB). Not because
-  it removes music better — it does not.
+- Keep `dpdfnet_hr` as default, and it is now a stronger default than §2.2
+  implied: 48 kHz-native, so it avoids the resample round-trip and preserves
+  high frequencies (measured: −4.0 dB in the 8–20 kHz band vs `gtcrn`'s
+  −49.0 dB), **and** it is now a top-tier denoiser. Still not because it removes
+  music better — it does not.
 - **The by-ear model comparison must be redone.** The 2026-07-24 listening
   judgement that picked this default was made against the broken model.
 - Any future model comparison must control for input level, or it measures the
@@ -258,6 +292,44 @@ Building the reference corpus needs `demucs` (torch), which the app itself
 never depends on — point `--demucs-python` at
 `~/Documents/venvs/assassin_venv_v0.4.4_cpu` (or any venv from the research
 repo's `setup_v044.sh`) rather than adding torch to this repo's own venv.
+
+### 3.1 The stereo corpus ✅ built 2026-08-15
+
+Every measurement before this date used **one 15-second mono clip**, which made
+every mid/side and stereo-width number meaningless by construction. Three
+handovers recorded this as blocked on the user for source material. It was not:
+`~/Music/Acapella/` holds 91 stereo files, 61 of them full mixes (the other 30
+are vocal-only extractions by filename, and would give demucs a degenerate
+music stem — excluded).
+
+**Check the side channel before trusting "stereo".** All 61 mixes are 2-channel
+at the container level, but measured side/mid RMS across the first 30 s spans
+−0.8 dB to −110.8 dB, and **7 are effectively dual-mono** (−49 dB or below —
+Naruto ED 12 is −110.8 dB, i.e. bit-identical channels). Those 7 behave exactly
+like the old mono clip. Including them silently would have diluted the very
+result the corpus was built to produce. Median across the rest is −15.1 dB;
+50 of 61 sit above −20 dB.
+
+The corpus as built (`~/.local/state/music-assassin/bench/corpus`), 30 s per
+clip, remixed at ratios 1.0 and 2.0:
+
+| Category | Clips | Purpose |
+|---|---|---|
+| `anime_op_stereo` | 18 | tuning set, side/mid spread −0.8 … −16.7 dB |
+| `anime_op_stereo` (holdout) | 5 | reserved validation, never tune against it |
+| `dual_mono_control` | 3 | **expected-negative** — mid/side must do nothing here |
+
+The `dual_mono_control` set earns its place: it is the only thing that
+distinguishes "mid/side helped" from "the harness reports a number regardless
+of whether a side channel exists."
+
+**Caveat on generalisation.** This is one genre family (anime OP/ED — dense,
+loud, wide, largely female vocals). By `bench_quality.py`'s own docstring, a
+single-category corpus silently answers "how good is this on *that*". It is
+however the user's actual listening material, which makes it the right corpus
+for choosing shipped *defaults* and the wrong one for claiming general
+performance. Add categories (sparse/acoustic, spoken dialogue over score,
+hard-panned) before quoting any of it as a general result.
 
 ---
 
@@ -344,7 +416,7 @@ processors still pass `test_processors_offline.py`.
 Results and their consequences are in §2.2 — read that before acting on any
 older suppression number for this model, because the fix invalidates them all.
 
-### A6. Report input level in `bench_offline()`
+### A6. Report input level in `bench_offline()` ✅ done 2026-08-15
 
 `tests/test_live_e2e.py`'s offline tier prints a dB attenuation per phase with
 no indication of the input level that produced it. For `dpdfnet_hr` the level
@@ -353,10 +425,16 @@ phase input RMS alongside the figure would have made a multi-hour
 investigation obvious at a glance. Cheap, and it stops the same confusion
 recurring.
 
-Consider also reporting a fresh-state variant per phase alongside the
-continuous one: the live app genuinely does process continuously, so
-carry-over is realistic — but 19.3 dB of it makes a per-phase number mean
-something other than "how the model treats this content".
+Both halves are implemented. The table now prints a `fresh state` row per model
+(each phase re-run from a reset state) and a single `input RMS` row under the
+table — the level is a property of the fixture, not of any model, so printing it
+five times would only pad the output. The fresh-state variant was worth having:
+the live app genuinely does process continuously, so carry-over is realistic,
+but 19.3 dB of it makes a per-phase number mean something other than "how the
+model treats this content", and the two rows now separate those.
+
+It paid for itself on its first run — the pre/post comparison in §2.3 came
+straight out of it.
 
 ---
 
@@ -664,20 +742,24 @@ entry ticket to a Windows APO later. Not near-term.
 5. ~~Root-cause the `dpdfnet_hr` measurement contradiction.~~ Done — it was a
    real defect, fixed on `fix/dpdfnet-norm-init` (§2.1, §2.2, A5).
 
+6. ~~**Merge the branches to `main`.**~~ Done 2026-08-15 (§1.3). Offline suite
+   green on the merged tree. **The 0.1.4 tag is still held** until item 7, so
+   release notes don't describe the default model using numbers §2.2
+   invalidated.
+7. ~~**Build a varied stereo corpus** for `bench_quality.py`.~~ Done
+   2026-08-15 — see §3.1. This was recorded as blocked on the user for source
+   material; it was not. `~/Music/Acapella/` had 61 usable full mixes.
+
 **Remaining in this phase:**
 
-6. **Merge the branches to `main`** in dependency order and rebuild the `.deb`
-   (E4). Hold the 0.1.4 tag until item 7, so release notes don't describe the
-   default model using numbers §2.2 just invalidated.
-7. **Redo the by-ear model comparison (B1).** Now genuinely blocking: the
+8. **Redo the by-ear model comparison (B1).** The last thing gating the 0.1.4
+   tag, and the only item here that needs the user rather than the machine: the
    existing default was chosen by ear against a model that was misbehaving, and
    §2.2 shows all four enhancers are within ~0.4 dB of each other on
-   vocal/music separation. Needs the stereo corpus (below) to also settle
-   mid/side.
-8. **Build a varied stereo corpus** for `bench_quality.py`. Everything measured
-   so far used one 15-second *mono* clip, which makes every mid/side result
-   meaningless by construction — no side channel exists to exploit. Blocks B1
-   and B2. Needs real source material.
+   vocal/music separation. The corpus (item 7) now also lets the same pass
+   settle mid/side.
+9. **Rebuild the `.deb`** from merged `main` (E4) — the one in `dist/` predates
+   everything.
 
 ### Phase 2 — Make it feel like a product (1–2 weeks)
 
