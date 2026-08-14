@@ -52,8 +52,13 @@ import numpy as np
 import soxr
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from assassin_live.paths import models_dir, state_dir  # noqa: E402
 from assassin_live import processors  # noqa: E402
+# Shared with bench_quality.py rather than reimplemented: this alignment is
+# subtle enough that having two copies is how the hardware tier's original
+# onset-threshold bug survived unnoticed in the first place.
+from bench_quality import estimate_lag  # noqa: E402
 
 FIXTURE_SR = 48000
 REPORT_DIR = state_dir() / "bench"
@@ -259,19 +264,57 @@ def bench_hardware(name, mdir, fixture, phases, work_dir: Path):
         engine.stop()
         routing.disable()
 
+    # Engine counters, captured before the numbers are interpreted. Without
+    # these a weak attenuation reading is ambiguous between "the model did
+    # this" and "the worker fell behind and the callback emitted DRY audio
+    # instead" — the engine falls back to passthrough by design when it can't
+    # keep up, which looks exactly like a model that removed nothing.
+    # fallback_blocks/blocks_in is the fraction of the run that was not
+    # actually processed, so any quality figure from a run with a non-trivial
+    # fallback rate is measuring the fallback, not the model.
+    s = engine.stats
     result = {"name": name, "sink": real.name,
-              "sink_restored": _wait_default_sink(real.name)}
+              "sink_restored": _wait_default_sink(real.name),
+              "blocks_in": s.blocks_in,
+              "fallback_blocks": s.fallback_blocks,
+              "fallback_pct": round(100.0 * s.fallback_blocks / max(1, s.blocks_in), 1),
+              "xruns": s.xruns,
+              "callback_errors": s.callback_errors,
+              "worker_ms_avg": round(s.worker_ms_avg, 2)}
     if not rec_path.is_file() or rec_path.stat().st_size < 1000:
         result["error"] = "no audio captured"
         return result
 
     rec_audio, _ = _read_wav(rec_path)
-    onset = np.where(np.abs(rec_audio) > 0.005)[0]
-    if not len(onset):
+    if not np.any(np.abs(rec_audio) > 1e-4):
         result["error"] = "recording is silent"
         return result
-    start = int(onset[0])
+
+    # Align by cross-correlating the whole recording against the fixture,
+    # NOT by taking the first sample above a fixed threshold.
+    #
+    # The old onset approach is what made this tier's numbers unreliable: the
+    # threshold fires on whatever crosses 0.005 first, which is the recorder's
+    # own noise floor or a room-noise transient as often as it is the fixture,
+    # and the resulting start offset shifts EVERY phase boundary by the same
+    # error. It was worst exactly where it mattered most — 48 kHz-native
+    # processors like dpdfnet_hr, whose (absent) resampling changes how much
+    # near-silence precedes the first loud sample, so the bias differed per
+    # model and looked like a real quality difference between models.
+    # Correlating over the whole clip uses every sample of evidence instead of
+    # one, and degrades gracefully when the model suppresses the opening.
+    #
+    # max_ms is generous because pw-record is deliberately started ~0.4 s
+    # before playback begins, so the true lag is far larger here than the
+    # model-latency-scale offsets this function normally sees.
+    lag = estimate_lag(rec_audio, fixture, max_ms=3000.0)
+    start = max(0, lag)
     sig = rec_audio[start:start + len(fixture)]
+    if len(sig) < FIXTURE_SR // 2:
+        result["error"] = (f"aligned recording too short "
+                           f"({len(sig)} samples at lag {lag})")
+        return result
+    result["align_lag_ms"] = round(lag / FIXTURE_SR * 1000.0, 1)
     result.update(_phase_db(sig, fixture[:len(sig)], phases))
     return result
 
@@ -329,6 +372,16 @@ def _print_hardware_table(results):
         for label in ("music_only", "noise_only", "music_speech"):
             if label in r:
                 print(f"      {label:<14} {r[label]:>6.1f} dB")
+        if "fallback_pct" in r:
+            warn = ("   <-- quality numbers above are unreliable: this much of "
+                    "the run was unprocessed dry audio"
+                    if r["fallback_pct"] > 2.0 else "")
+            print(f"      {'aligned at':<14} {r.get('align_lag_ms', '?')} ms")
+            print(f"      {'dry fallback':<14} {r['fallback_pct']:>6.1f} %  "
+                  f"({r['fallback_blocks']}/{r['blocks_in']} blocks){warn}")
+            print(f"      {'worker':<14} {r['worker_ms_avg']:>6.2f} ms/block "
+                  f"(20 ms budget)   xruns={r['xruns']}  "
+                  f"callback_errors={r['callback_errors']}")
 
 
 def main():
