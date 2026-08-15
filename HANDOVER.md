@@ -100,6 +100,12 @@ including the trap that 7 of those "stereo" files are actually dual-mono.
 - Building the harness's reference corpus needs `demucs` (torch), which this
   app deliberately never depends on — run it out-of-process via
   `--demucs-python ~/Documents/venvs/assassin_venv_v0.4.4_cpu/bin/python`.
+- **Detach long runs from the editor.** A corpus build is ~4–6 min per clip on
+  this 4-core i3 (mdx_extra ensembles four models), so a full one is hours, and
+  VS Code crashing has already killed one mid-run. Start them with
+  `setsid nohup … &` so they survive. `build_refs` now checkpoints its manifest
+  after every source and skips completed clips, so rerunning the same command
+  resumes; `--rebuild` forces a redo.
 - `tests/test_live_e2e.py`'s hardware tier and anything calling
   `RoutingSession.enable()` **take over the system default audio sink**.
   `python -m assassin_live --recover` restores it if something dies mid-run.
