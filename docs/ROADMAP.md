@@ -323,6 +323,29 @@ The `dual_mono_control` set earns its place: it is the only thing that
 distinguishes "mid/side helped" from "the harness reports a number regardless
 of whether a side channel exists."
 
+**Two build choices that change how these numbers should be read.**
+
+*Excerpts are chosen, not taken from the head.* Each clip is a 30 s window
+picked by highest centre-channel energy in the 200 Hz–4 kHz band, never
+starting in the first 10 s. This is not cosmetic: an anime OP usually opens
+instrumental, and `build_refs()` normalises the vocal stem to a target RMS —
+so a clip whose vocal stem is near-silent gets its *bleed and artifacts*
+amplified to full scale, silently poisoning the ground truth for that clip
+while looking perfectly healthy in the manifest. Every selected window landed
+between 25.9 s and 230 s in, confirming the heads really were intros.
+`--duration` truncates *after* separation, so the excerpts are also cut before
+demucs ever sees them.
+
+*Ceiling is `htdemucs`, not `mdx_extra`.* mdx_extra is the better separator and
+the harness default, but it is a four-model ensemble: 3.6 GB peak RSS and 132 s
+even on a 30 s excerpt. On this 11.5 GB machine, with swap already exhausted,
+the kernel OOM-killed the first corpus build outright (victim at 4.8 GB, taking
+the editor down with it). htdemucs costs 1.2 GB and 39 s for a modest quality
+loss. The consequence to remember: **"% of offline ceiling" is now relative to
+htdemucs**, a slightly lower bar than before, so ceiling percentages are not
+comparable across the model change. Rebuild with `--demucs-model mdx_extra` on
+a larger machine if an absolute ceiling is ever needed.
+
 **Caveat on generalisation.** This is one genre family (anime OP/ED — dense,
 loud, wide, largely female vocals). By `bench_quality.py`'s own docstring, a
 single-category corpus silently answers "how good is this on *that*". It is
