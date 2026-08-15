@@ -62,9 +62,10 @@ Every previously-recorded suppression figure for this model is invalidated.
    machine. The current default was chosen by ear against a misbehaving model,
    and all four enhancers are within ~0.4 dB of each other. The stereo corpus
    (ROADMAP §3.1) is built, so the same listening pass settles mid/side too.
-2. **Rebuild the `.deb`** from merged `main` — the one in `dist/` predates
-   everything. Then cut the 0.1.4 tag, once item 1 has confirmed what the
-   release notes should say about the default model.
+2. **Cut the 0.1.4 tag and push** — once item 1 has confirmed what the release
+   notes should say about the default model. The `.deb` itself is already
+   rebuilt from merged `main` (2026-08-15, 0.1.4, binary smoke-tested,
+   `speechdenoiser` correctly excluded for its unresolved license).
 3. Then Phase 2 in the roadmap: C1 gapless device switching (the originally
    reported pain point), C2 volume forwarding.
 

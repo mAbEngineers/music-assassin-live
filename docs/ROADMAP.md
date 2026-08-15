@@ -758,8 +758,10 @@ entry ticket to a Windows APO later. Not near-term.
    §2.2 shows all four enhancers are within ~0.4 dB of each other on
    vocal/music separation. The corpus (item 7) now also lets the same pass
    settle mid/side.
-9. **Rebuild the `.deb`** from merged `main` (E4) — the one in `dist/` predates
-   everything.
+9. ~~**Rebuild the `.deb`** from merged `main` (E4).~~ Done 2026-08-15 —
+   0.1.4, binary smoke-tested, four redistributable models bundled
+   (`speechdenoiser` correctly excluded, license still unresolved). Ships as
+   soon as item 8 clears the tag.
 
 ### Phase 2 — Make it feel like a product (1–2 weeks)
 
