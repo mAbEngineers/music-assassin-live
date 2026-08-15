@@ -242,7 +242,8 @@ def mono(x: np.ndarray) -> np.ndarray:
 
 def build_refs(sources, corpus: Path, demucs_python: str, model: str,
                ratios, duration_s: float | None,
-               category: str = "general", holdout: bool = False) -> dict:
+               category: str = "general", holdout: bool = False,
+               rebuild: bool = False) -> dict:
     """Separate each source into vocals/music stems, remix at each ratio, and
     separate the remix again to establish the offline ceiling.
 
@@ -265,11 +266,22 @@ def build_refs(sources, corpus: Path, demucs_python: str, model: str,
         existing = {e["name"]: e for e in prior.get("items", [])}
     manifest = {"model": model, "ratios": list(ratios), "items": []}
 
-    for src in sources:
+    def _flush():
+        # Merge rather than overwrite: building a corpus is slow and
+        # incremental (a category at a time), so a second --build-refs run
+        # must not silently discard everything the first one produced.
+        manifest["items"] = list(existing.values())
+        (corpus / "manifest.json").write_text(json.dumps(manifest, indent=2))
+
+    for i, src in enumerate(sources, 1):
         src = Path(src).resolve()
         item = corpus / src.stem
         item.mkdir(parents=True, exist_ok=True)
-        print(f"\n=== {src.name}")
+        print(f"\n=== [{i}/{len(sources)}] {src.name}")
+
+        if src.stem in existing and not rebuild:
+            print("  already in manifest — skipping (pass --rebuild to redo)")
+            continue
 
         stems = _demucs(src, item / "_sep", demucs_python, model)
         if stems is None:
@@ -307,11 +319,15 @@ def build_refs(sources, corpus: Path, demucs_python: str, model: str,
             entry["mixes"][tag] = {"alpha": a}
         existing[entry["name"]] = entry
 
-    # Merge rather than overwrite: building a corpus is slow and incremental
-    # (a category at a time), so a second --build-refs run must not silently
-    # discard everything the first one produced.
-    manifest["items"] = list(existing.values())
-    (corpus / "manifest.json").write_text(json.dumps(manifest, indent=2))
+        # Checkpoint after every source, not once at the end. A full corpus is
+        # hours of demucs on CPU; writing the manifest only after the last
+        # source means any interruption -- a crashed editor, a closed laptop --
+        # discards every completed clip along with the incomplete one. Learned
+        # the hard way. Combined with the skip above, an interrupted build now
+        # resumes by rerunning the same command.
+        _flush()
+
+    _flush()
     kept = len(manifest["items"])
     print(f"\ncorpus written: {corpus}  ({kept} items total)")
     return manifest
@@ -1341,6 +1357,10 @@ def main() -> int:
     ap.add_argument("--holdout", action="store_true",
                     help="with --build-refs: mark these clips as the reserved "
                          "validation set, excluded from normal runs")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="with --build-refs: re-separate sources already in "
+                         "the manifest (default is to skip them, so an "
+                         "interrupted build resumes by rerunning the command)")
     ap.add_argument("--only-category", default=None,
                     help="evaluate only clips with this category label")
     ap.add_argument("--include-holdout", action="store_true",
@@ -1361,7 +1381,8 @@ def main() -> int:
     if args.build_refs:
         build_refs(args.build_refs, args.corpus, args.demucs_python,
                    args.demucs_model, ratios, duration,
-                   category=args.category, holdout=args.holdout)
+                   category=args.category, holdout=args.holdout,
+                   rebuild=args.rebuild)
         return 0
 
     manifest_path = args.corpus / "manifest.json"
