@@ -57,17 +57,19 @@ Every previously-recorded suppression figure for this model is invalidated.
 
 ## Immediate next actions
 
-1. **The by-ear model comparison (B1)** — the one thing gating the 0.1.4 tag,
-   and the only remaining Phase 1 item that needs a human rather than the
-   machine. The current default was chosen by ear against a misbehaving model,
-   and all four enhancers are within ~0.4 dB of each other. The stereo corpus
-   (ROADMAP §3.1) is built, so the same listening pass settles mid/side too.
-2. **Cut the 0.1.4 tag and push** — once item 1 has confirmed what the release
+1. **Get 15–25 full mixes** onto the machine (see the corrected note below) —
+   this is the long pole and it needs you. Everything mid/side is stuck behind
+   it.
+2. **The by-ear model comparison (B1)** — gates the 0.1.4 tag. The current
+   default was chosen by ear against a misbehaving model, and all four
+   enhancers are within ~0.4 dB of each other. The *model* half can run against
+   the existing fixtures without the corpus; the mid/side half cannot.
+3. **Cut the 0.1.4 tag and push** — once item 2 has confirmed what the release
    notes should say about the default model. The `.deb` itself is already
    rebuilt from merged `main` (2026-08-15, 0.1.4, binary smoke-tested,
    `speechdenoiser` correctly excluded for its unresolved license).
-3. Then Phase 2 in the roadmap: C1 gapless device switching (the originally
-   reported pain point), C2 volume forwarding.
+4. Then Phase 2 in the roadmap: C1 gapless device switching (the originally
+   reported pain point), C2 volume forwarding. Neither needs the corpus.
 
 Worth reordering ahead of Phase 3 when you get there: the **stereo processor
 contract** (`wants_stereo`, engine stops downmixing) is currently buried inside
@@ -88,10 +90,20 @@ Listed in full as ROADMAP §10. The ones that block work right now:
 - **Mono output while filtering** — currently total (−122 dB side-channel at
   100 % wet). Acceptable, or is stereo preservation required?
 
-~~Stereo source material for the corpus.~~ **Resolved 2026-08-15** — this was
-recorded as blocked on you across three handovers and it was not. There were 61
-usable full mixes in `~/Music/Acapella/`. Corpus built; see ROADMAP §3.1,
-including the trap that 7 of those "stereo" files are actually dual-mono.
+- **Stereo source material for the corpus — still the blocker, and it is the
+  long pole.** A 2026-08-15 attempt to resolve it from `~/Music/Acapella/`
+  failed: the folder name is accurate, **all 91 files are vocal-only
+  extractions**, not just the 30 labeled "Vocals". The other ~409 audio files
+  in `$HOME` are voice-AI call recordings and screen captures. There is no
+  music on this machine. Separating an acapella yields a corpus that looks
+  healthy and is fictitious — demucs returns the track as "vocals" and its own
+  residue as "music", which then gets normalised up to full scale and remixed
+  as if it were real. Caught after two clips; corpus deleted.
+  **What to supply: 15–25 full mixes with the instrumental present**, 30 s+,
+  varied in genre, density and stereo width, a few hard-panned. Vocal stems are
+  not needed — demucs manufactures the ground truth. ROADMAP §3.1 has the
+  diagnosis and a ~1 s-per-file pre-check that catches acapellas before a
+  multi-hour build wastes itself on them.
 
 ## Environment notes
 

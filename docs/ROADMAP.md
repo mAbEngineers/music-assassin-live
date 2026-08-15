@@ -293,66 +293,72 @@ never depends on — point `--demucs-python` at
 `~/Documents/venvs/assassin_venv_v0.4.4_cpu` (or any venv from the research
 repo's `setup_v044.sh`) rather than adding torch to this repo's own venv.
 
-### 3.1 The stereo corpus ✅ built 2026-08-15
+### 3.1 The stereo corpus — still blocked, and now we know exactly why
 
-Every measurement before this date used **one 15-second mono clip**, which made
-every mid/side and stereo-width number meaningless by construction. Three
-handovers recorded this as blocked on the user for source material. It was not:
-`~/Music/Acapella/` holds 91 stereo files, 61 of them full mixes (the other 30
-are vocal-only extractions by filename, and would give demucs a degenerate
-music stem — excluded).
+Every measurement so far used **one 15-second mono clip**, which makes every
+mid/side and stereo-width number meaningless by construction. Three handovers
+recorded this as blocked on the user for source material. **It still is.** An
+attempt on 2026-08-15 to build it from `~/Music/Acapella/` was abandoned
+mid-build; what follows is what that attempt established, so nobody repeats it.
 
-**Check the side channel before trusting "stereo".** All 61 mixes are 2-channel
-at the container level, but measured side/mid RMS across the first 30 s spans
-−0.8 dB to −110.8 dB, and **7 are effectively dual-mono** (−49 dB or below —
-Naruto ED 12 is −110.8 dB, i.e. bit-identical channels). Those 7 behave exactly
-like the old mono clip. Including them silently would have diluted the very
-result the corpus was built to produce. Median across the rest is −15.1 dB;
-50 of 61 sit above −20 dB.
+**There is no music on this machine.** `~/Music/Acapella/` holds 91 stereo
+files, and the folder name is literally accurate — **all of them are
+vocal-only extractions**, not just the 30 with "Vocals" in the filename. The
+remaining ~409 audio files in `$HOME` are voice-AI call recordings, screen
+captures and dialogue test clips. No full mixes exist anywhere.
 
-The corpus as built (`~/.local/state/music-assassin/bench/corpus`), 30 s per
-clip, remixed at ratios 1.0 and 2.0:
+Feeding an acapella to `build_refs()` produces a corpus that looks healthy and
+is entirely fictitious: demucs returns the whole track as the "vocals" stem and
+*separation residue* as the "music" stem, and `_norm()` then amplifies that
+residue to the target RMS and remixes it as though it were music. Two clips got
+that far before the check below caught it — their raw vocal stems were
+**+21.8 dB and +20.1 dB louder than their "music" stems**, where a real mix
+would be the other way round. The corpus was deleted.
 
-| Category | Clips | Purpose |
-|---|---|---|
-| `anime_op_stereo` | 18 | tuning set, side/mid spread −0.8 … −16.7 dB |
-| `anime_op_stereo` (holdout) | 5 | reserved validation, never tune against it |
-| `dual_mono_control` | 3 | **expected-negative** — mid/side must do nothing here |
+**The cheap pre-check that catches this — run it on any material before
+building.** An acapella has essentially no sustained 30–150 Hz energy (no bass,
+no kick); a real mix does. No separation required, ~1 s per file:
 
-The `dual_mono_control` set earns its place: it is the only thing that
-distinguishes "mid/side helped" from "the harness reports a number regardless
-of whether a side channel exists."
+| material | low-end energy, 30–150 Hz vs total |
+|---|---|
+| `bench_op10s_mono_ref.wav` (known real music) | **−5.1 dB** |
+| dialogue reference clip | −7.9 dB |
+| instrumental stem | −10.3 dB |
+| `Naruto op 17 Vocals.mp3` (labeled acapella) | **−42.7 dB** |
+| all 26 candidates from `~/Music/Acapella/` | **−26.5 … −74.6 dB** |
 
-**Two build choices that change how these numbers should be read.**
+Real content sits around −5 to −10 dB. Below about −25 dB it is vocal-only.
+The script is `make_excerpts.py` / `lowend.py` in the session scratchpad; it is
+worth reimplementing next to the harness when real material arrives.
 
-*Excerpts are chosen, not taken from the head.* Each clip is a 30 s window
-picked by highest centre-channel energy in the 200 Hz–4 kHz band, never
-starting in the first 10 s. This is not cosmetic: an anime OP usually opens
-instrumental, and `build_refs()` normalises the vocal stem to a target RMS —
-so a clip whose vocal stem is near-silent gets its *bleed and artifacts*
-amplified to full scale, silently poisoning the ground truth for that clip
-while looking perfectly healthy in the manifest. Every selected window landed
-between 25.9 s and 230 s in, confirming the heads really were intros.
-`--duration` truncates *after* separation, so the excerpts are also cut before
-demucs ever sees them.
+**Two other traps found on the way, both still valid for the real corpus:**
 
-*Ceiling is `htdemucs`, not `mdx_extra`.* mdx_extra is the better separator and
-the harness default, but it is a four-model ensemble: 3.6 GB peak RSS and 132 s
-even on a 30 s excerpt. On this 11.5 GB machine, with swap already exhausted,
-the kernel OOM-killed the first corpus build outright (victim at 4.8 GB, taking
-the editor down with it). htdemucs costs 1.2 GB and 39 s for a modest quality
-loss. The consequence to remember: **"% of offline ceiling" is now relative to
-htdemucs**, a slightly lower bar than before, so ceiling percentages are not
-comparable across the model change. Rebuild with `--demucs-model mdx_extra` on
-a larger machine if an absolute ceiling is ever needed.
+*Channel count is not stereo.* All 91 files are 2-channel, but side/mid RMS
+spans −0.8 dB to −110.8 dB and **7 are effectively dual-mono** (−49 dB or
+below; one is −110.8 dB, i.e. bit-identical channels). Those behave exactly
+like the old mono clip. Check the side channel, not the container. When the
+real corpus is built, keep a few such clips as a `dual_mono_control` category:
+it is the only thing that distinguishes "mid/side helped" from "the harness
+prints a number whether or not a side channel exists".
 
-**Caveat on generalisation.** This is one genre family (anime OP/ED — dense,
-loud, wide, largely female vocals). By `bench_quality.py`'s own docstring, a
-single-category corpus silently answers "how good is this on *that*". It is
-however the user's actual listening material, which makes it the right corpus
-for choosing shipped *defaults* and the wrong one for claiming general
-performance. Add categories (sparse/acoustic, spoken dialogue over score,
-hard-panned) before quoting any of it as a general result.
+*Don't excerpt from the head, and mind the memory.* `--duration` truncates
+*after* separation, so demucs chews whole tracks — peak RSS 4.8 GB, and the
+kernel OOM-killed the first build outright, taking the editor with it. Cut
+excerpts before separation. Pick them by centre-channel energy in the
+200 Hz–4 kHz band rather than from the start of the track, since intros are
+instrumental and a near-silent vocal stem gets its bleed normalised up to full
+scale. And prefer `--demucs-model htdemucs` here: `mdx_extra` is a four-model
+ensemble costing 3.6 GB and 132 s even on a 30 s excerpt, against htdemucs'
+1.2 GB and 39 s. Note that this lowers the bar "% of offline ceiling" is
+measured against, so ceiling percentages are not comparable across that choice.
+
+**What is actually needed** (the ask for the user, unchanged from three
+handovers ago but now specific): **15–25 full mixes with the instrumental
+present** — ideally 30 s or longer, varied in genre, arrangement density and
+stereo width, and including a few hard-panned or wide-mixed tracks. Anything
+from a normal music library works. Vocal stems are *not* needed; demucs
+manufactures the ground truth. Until then B1 and B2 cannot be settled, and
+every mid/side number in this document remains unmeasured.
 
 ---
 
@@ -769,18 +775,19 @@ entry ticket to a Windows APO later. Not near-term.
    green on the merged tree. **The 0.1.4 tag is still held** until item 7, so
    release notes don't describe the default model using numbers §2.2
    invalidated.
-7. ~~**Build a varied stereo corpus** for `bench_quality.py`.~~ Done
-   2026-08-15 — see §3.1. This was recorded as blocked on the user for source
-   material; it was not. `~/Music/Acapella/` had 61 usable full mixes.
-
 **Remaining in this phase:**
 
+7. **Build a varied stereo corpus** for `bench_quality.py` — **still blocked on
+   source material.** A 2026-08-15 attempt to build it from `~/Music/Acapella/`
+   was abandoned: every file there is vocal-only, and there is no music
+   anywhere else on the machine. §3.1 has the diagnosis, the cheap pre-check
+   that catches acapellas in ~1 s per file, and the specific ask (15–25 full
+   mixes with the instrumental present).
 8. **Redo the by-ear model comparison (B1).** The last thing gating the 0.1.4
-   tag, and the only item here that needs the user rather than the machine: the
-   existing default was chosen by ear against a model that was misbehaving, and
-   §2.2 shows all four enhancers are within ~0.4 dB of each other on
-   vocal/music separation. The corpus (item 7) now also lets the same pass
-   settle mid/side.
+   tag: the existing default was chosen by ear against a model that was
+   misbehaving, and §2.2 shows all four enhancers are within ~0.4 dB of each
+   other on vocal/music separation. The model half can run on the existing
+   fixtures; the mid/side half needs item 7 first.
 9. ~~**Rebuild the `.deb`** from merged `main` (E4).~~ Done 2026-08-15 —
    0.1.4, binary smoke-tested, four redistributable models bundled
    (`speechdenoiser` correctly excluded, license still unresolved). Ships as
