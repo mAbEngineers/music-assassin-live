@@ -1,6 +1,6 @@
 # Handover — current state
 
-Updated 2026-08-15. **This file is deliberately short.** It covers only where
+Updated 2026-08-16. **This file is deliberately short.** It covers only where
 things stand *right now* and what to do next. The plan, the reasoning, the
 measured findings and the list of dead ends all live in
 [`docs/ROADMAP.md`](docs/ROADMAP.md) — read that before re-deriving anything.
@@ -57,13 +57,17 @@ Every previously-recorded suppression figure for this model is invalidated.
 
 ## Immediate next actions
 
-1. **Get 15–25 full mixes** onto the machine (see the corrected note below) —
-   this is the long pole and it needs you. Everything mid/side is stuck behind
-   it.
+1. **Corpus build in progress, unattended.** The user supplied 57 real files
+   at `~/Music/MusicAssassin/Corpus/` on 2026-08-16 (fixing the 2026-08-15
+   dead end below). A detached htdemucs build is running as of this write-up,
+   ~2 h budget on this machine — check `~/.local/state/music-assassin/bench/corpus/manifest.json`
+   for progress (57 items when done). See ROADMAP §3.1 for composition and
+   the window-selection bug that was caught and fixed before it could bias the
+   ground truth.
 2. **The by-ear model comparison (B1)** — gates the 0.1.4 tag. The current
    default was chosen by ear against a misbehaving model, and all four
    enhancers are within ~0.4 dB of each other. The *model* half can run against
-   the existing fixtures without the corpus; the mid/side half cannot.
+   the existing fixtures right now; the mid/side half needs item 1 to finish.
 3. **Cut the 0.1.4 tag and push** — once item 2 has confirmed what the release
    notes should say about the default model. The `.deb` itself is already
    rebuilt from merged `main` (2026-08-15, 0.1.4, binary smoke-tested,
@@ -90,20 +94,19 @@ Listed in full as ROADMAP §10. The ones that block work right now:
 - **Mono output while filtering** — currently total (−122 dB side-channel at
   100 % wet). Acceptable, or is stereo preservation required?
 
-- **Stereo source material for the corpus — still the blocker, and it is the
-  long pole.** A 2026-08-15 attempt to resolve it from `~/Music/Acapella/`
-  failed: the folder name is accurate, **all 91 files are vocal-only
-  extractions**, not just the 30 labeled "Vocals". The other ~409 audio files
-  in `$HOME` are voice-AI call recordings and screen captures. There is no
-  music on this machine. Separating an acapella yields a corpus that looks
-  healthy and is fictitious — demucs returns the track as "vocals" and its own
-  residue as "music", which then gets normalised up to full scale and remixed
-  as if it were real. Caught after two clips; corpus deleted.
-  **What to supply: 15–25 full mixes with the instrumental present**, 30 s+,
-  varied in genre, density and stereo width, a few hard-panned. Vocal stems are
-  not needed — demucs manufactures the ground truth. ROADMAP §3.1 has the
-  diagnosis and a ~1 s-per-file pre-check that catches acapellas before a
-  multi-hour build wastes itself on them.
+~~Stereo source material for the corpus.~~ **Resolved 2026-08-16.** The
+2026-08-15 attempt from `~/Music/Acapella/` failed outright — that folder name
+is accurate, all 91 files are vocal-only. The user then supplied 57 real files
+at `~/Music/MusicAssassin/Corpus/`: the original 39 anime OP/EDs plus 18 tracks
+added specifically because the first batch turned out to be **100% female
+vocal** (median F0 331 Hz, nothing below 205 Hz) — `male_lead` (8), `rap` (3),
+`sparse_acoustic` (4), `orchestral_dialogue` (3). All 57 passed the acapella
+guard before separation. ROADMAP §3.1 has the full composition, the acapella
+pre-check (now `scripts/corpus_excerpt.py`, committed), and a second bug this
+round caught before it could bias results — the excerpt window-picker was
+landing on the loudest 20 s (usually the chorus) rather than the first vocal
+entrance, which would have understated how low male vocals in this material
+actually go.
 
 ## Environment notes
 
@@ -112,12 +115,20 @@ Listed in full as ROADMAP §10. The ones that block work right now:
 - Building the harness's reference corpus needs `demucs` (torch), which this
   app deliberately never depends on — run it out-of-process via
   `--demucs-python ~/Documents/venvs/assassin_venv_v0.4.4_cpu/bin/python`.
-- **Detach long runs from the editor.** A corpus build is ~4–6 min per clip on
-  this 4-core i3 (mdx_extra ensembles four models), so a full one is hours, and
-  VS Code crashing has already killed one mid-run. Start them with
-  `setsid nohup … &` so they survive. `build_refs` now checkpoints its manifest
-  after every source and skips completed clips, so rerunning the same command
-  resumes; `--rebuild` forces a redo.
+- **Detach long runs from the editor.** VS Code crashing has already killed one
+  corpus build mid-run (and once triggered an OOM kill — see below). Start them
+  with `setsid nohup … &` and verify with `ps -o pid,sid` that SID == PID.
+  `build_refs` checkpoints its manifest after every source and skips completed
+  clips, so rerunning the same command resumes; `--rebuild` forces a redo.
+- **Excerpt before separating, and use `htdemucs` not `mdx_extra`.**
+  `scripts/corpus_excerpt.py` cuts a 30 s excerpt per source before demucs ever
+  sees it (`--duration` on `build_refs` truncates *after* separation, so
+  without this demucs chews whole tracks — that's what OOM-killed the machine
+  on 2026-08-15). It also refuses acapella-looking sources outright and biases
+  its window pick toward the first vocal entrance rather than the loudest
+  moment (see ROADMAP §3.1 for why that distinction mattered). `mdx_extra`
+  peaks at 3.6 GB / 132 s even on a 30 s excerpt; `htdemucs` is 1.2 GB / 39 s
+  for a modest quality loss — use it on this machine.
 - `tests/test_live_e2e.py`'s hardware tier and anything calling
   `RoutingSession.enable()` **take over the system default audio sink**.
   `python -m assassin_live --recover` restores it if something dies mid-run.
