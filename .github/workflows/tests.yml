@@ -1,0 +1,44 @@
+name: tests
+
+# Motivated by two bugs found on 2026-08-18, both of which had been shipped
+# and silent for weeks: pin_stream() had never once succeeded (it matched on
+# pipewire.sec.pid, which is the daemon's pid for pulse-proxied clients), and
+# the capture-hijack detector inherited the same lookup and could not see
+# anything it was written to catch. Neither showed up as a failure anywhere,
+# because nothing ran automatically. See ROADMAP E1, C1, C8.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  hardware-free:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # tkinter: assassin_live.ui.app imports it at module scope, and
+      # test_status_line imports that module (it never constructs a Tk root,
+      # so no display is needed -- only the import must resolve).
+      # libportaudio2: sounddevice binds it at import time.
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk libportaudio2
+
+      - name: Python packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # The same entry point developers run. If the two ever diverge, CI
+      # stops meaning what it appears to mean.
+      - name: Run suite
+        env:
+          PY: python
+        run: ./scripts/run_tests.sh

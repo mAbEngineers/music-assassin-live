@@ -162,10 +162,14 @@ the case it caused; it does not make the test safe in general.
    flip — or don't flip — the stereo default on what it says. This is the
    only thing standing between the −161 dB image collapse and it being
    fixed for real; the code is written and tested.
-4. Then Phase 2 in the roadmap: **E1** CI is what is left — there are now
-   eight hardware-free test files and nothing runs them automatically.
-   (**C1**, **C2**, **C3**, **C4**, **C7** and **C8** are all done — see
-   below.)
+4. **Phase 2 is complete** as of 2026-08-18 — C1, C2, C3, C4, C7, C8 and E1
+   all done. Next is Phase 3: **A1**, the separator spike, which the
+   `wants_stereo` seam now unblocks.
+
+   Run the suite with `./scripts/run_tests.sh` (seven hardware-free files,
+   ~10 s; the model benchmark adds ~80 s when the ONNX files are present and
+   is reported as SKIPPED when they are not). CI runs the same script.
+   `test_routing_dry.py` is deliberately not in it — see the incident below.
 
 **One belief was retracted today, and it matters more than the feature that
 retracted it.** C2 was promoted from a UX wart to a *measurement confound* on

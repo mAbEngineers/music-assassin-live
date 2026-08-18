@@ -1241,11 +1241,36 @@ entry ticket to a Windows APO later. Not near-term.
 
 ## 8. Workstream E — Infrastructure & hygiene
 
-- **E1. CI.** GitHub Actions running `test_processors_offline.py` +
-  `test_routing_dry.py` on push. Enables a real build-status badge (the README
-  badge row deliberately omits one today because nothing backs it). The
-  research repo already added a Windows CI workflow in `230a75f` — copy the
-  pattern.
+- **E1. CI ✅ done 2026-08-18.** `.github/workflows/tests.yml` on push/PR,
+  calling `scripts/run_tests.sh` — the same entry point developers run, so the
+  two cannot drift into testing different things.
+
+  **The scope above was wrong in two ways and is corrected here.**
+  `test_routing_dry.py` cannot run in CI: there is no PipeWire there, and it
+  is the test that caused C8's incident by mutating a live graph — a guard is
+  not a reason to run it unattended. And `test_processors_offline.py` needs
+  the ONNX models, which are gitignored, so in CI it has nothing to test.
+
+  That second one was the interesting part: with no models it iterated an
+  empty list and printed **"all passed"** — a green tick meaning "no models
+  were installed", read as "the processors are fine". Running that in CI
+  would have produced a permanently green, permanently meaningless job. It
+  now reports `NOTHING TESTED` and exits non-zero (`ALLOW_NO_MODELS=1` to
+  override), and the runner reports it as **SKIPPED** rather than dropping it
+  silently — a suite that quietly shrinks is how a check stops covering
+  anything without anyone noticing.
+
+  What actually runs: the seven hardware-free files, which need no audio, no
+  PipeWire and no display. `test_status_line` imports `ui.app` and therefore
+  tkinter, but never constructs a root, so only the import has to resolve —
+  hence `python3-tk` in the workflow, and `libportaudio2` because
+  `sounddevice` binds it at import.
+
+  **Why now rather than later:** both bugs found on 2026-08-18 had shipped and
+  stayed silent — `pin_stream()` had never once succeeded, and C8's detector
+  could not see anything it was written to catch. Neither surfaced as a
+  failure anywhere, because nothing ran automatically. A build-status badge
+  now has something behind it.
 - **E2. Hardware-tier alignment — FIXED 2026-08-13; a second defect found
   underneath it, still open.**
   The onset-threshold alignment is replaced by whole-clip cross-correlation
@@ -1356,7 +1381,8 @@ entry ticket to a Windows APO later. Not near-term.
     reports itself healthy while capturing its own output. See C8.
 16. ~~**C3 — coherent system-picker behavior**, **C4 — human status line**
     (and **C7**, latency, which C4's line carries).~~ All done 2026-08-18.
-17. **E1 — CI** (scoped smaller than it looks; see E1).
+17. ~~**E1 — CI**~~ Done 2026-08-18 — `scripts/run_tests.sh` plus a GitHub
+    Actions workflow that calls it. Phase 2 is complete.
 
 ### Phase 3 — Make it actually remove music (weeks)
 

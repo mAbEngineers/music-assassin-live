@@ -7,6 +7,7 @@ For each available processor:
   3. benchmark ms per 20 ms block -> real-time headroom
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -87,8 +88,19 @@ def main():
         except Exception as e:  # noqa: BLE001
             print(f"  FAIL {name}: {e}")
             results.append({"name": name, "error": str(e)})
+    if not results:
+        # A pass with nothing in it is worse than no test: it is a green
+        # tick that means "no models were installed", and read as "the
+        # processors are fine". This project has already been bitten twice
+        # by checks that could not see anything and did not say so
+        # (ROADMAP C1, C8), so this one is loud about it.
+        print(f"\nNOTHING TESTED — no .onnx models found in {mdir}")
+        print("  Install them, point MUSIC_ASSASSIN_MODELS at them, or set")
+        print("  ALLOW_NO_MODELS=1 if a model-free run is genuinely intended.")
+        return 0 if os.environ.get("ALLOW_NO_MODELS") == "1" else 1
+
     ok = all("error" not in r for r in results)
-    print("\nall passed" if ok else "\nFAILURES above")
+    print(f"\nall passed ({len(results)} processors)" if ok else "\nFAILURES above")
     return 0 if ok else 1
 
 

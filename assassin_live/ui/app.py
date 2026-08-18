@@ -54,6 +54,11 @@ class App:
         self.mute_wet = saved.get("mute_wet", False)
         self.mix_pct = saved.get("mix_pct", 100.0)
         self.midside_enabled = saved.get("midside_enabled", False)
+        # Default off, matching AudioEngine.set_stereo: B3 measured it as
+        # free on every mono metric across 104 pairs, but those metrics run
+        # on the mono downmix and are blind to whether the side channel it
+        # restores contains audible music. Until someone listens, off.
+        self.stereo_enabled = saved.get("stereo_enabled", False)
         self.bandlimit_enabled = saved.get("bandlimit_enabled", True)
         self.atten_db = saved.get("atten_db", 0.0)
         self._initial_pipeline = saved.get("pipeline", "dpdfnet_hr")
@@ -76,6 +81,7 @@ class App:
         self._build_pickers()
         self._build_midside_toggle()
         self._build_bandlimit_toggle()
+        self._build_stereo_toggle()
         self._build_atten_slider()
         self._build_waveform()
         self._build_sliders()
@@ -131,6 +137,7 @@ class App:
                 "mute_dry": self.mute_dry,
                 "mute_wet": self.mute_wet,
                 "midside_enabled": self.midside_enabled,
+                "stereo_enabled": self.stereo_enabled,
                 "bandlimit_enabled": self.bandlimit_enabled,
                 "atten_db": self.atten_db,
             }))
@@ -342,6 +349,24 @@ class App:
         if self.engine:
             self.engine.set_atten_limit(value)
 
+    def _build_stereo_toggle(self):
+        row = tk.Frame(self.root, bg=BG)
+        row.pack(fill=tk.X, padx=20, pady=(0, 14))
+        self.stereo_btn = tk.Button(
+            row, font=("Sans", 9, "bold"), bd=0, relief=tk.FLAT,
+            highlightthickness=0, padx=10, pady=8, cursor="hand2",
+            command=self._toggle_stereo)
+        self._style_toggle_btn(self.stereo_btn, "Preserve Stereo Image",
+                               self.stereo_enabled)
+        self.stereo_btn.pack(fill=tk.X)
+
+    def _toggle_stereo(self):
+        self.stereo_enabled = not self.stereo_enabled
+        self._style_toggle_btn(self.stereo_btn, "Preserve Stereo Image",
+                               self.stereo_enabled)
+        if self.engine:
+            self.engine.set_stereo(self.stereo_enabled)
+
     def _toggle_midside(self):
         self.midside_enabled = not self.midside_enabled
         self._style_toggle_btn(self.midside_btn, "Mid/Side Prefilter", self.midside_enabled)
@@ -453,6 +478,7 @@ class App:
             self.engine.set_volumes(wet=self._wet_boost(self.mix_pct))
             self.engine.set_midside(self.midside_enabled)
             self.engine.set_bandlimit(self.bandlimit_enabled)
+            self.engine.set_stereo(self.stereo_enabled)
             self.engine.set_atten_limit(self.atten_db)
             self._push_mutes()
             self.engine.start(self.routing.monitor_source, real.name)
