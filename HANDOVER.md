@@ -12,8 +12,8 @@ measured findings and the list of dead ends all live in
 | Branch | Contents | State |
 |---|---|---|
 | `main` | 0.1.4, green on the offline suite | at `8df4f83` |
-| `feature/stereo-output` | B3 stereo rebuild, `wants_stereo`, C1, C2, C3, C4, C7, C8, E1 | **14 commits, unpushed** |
-| `feat/separator-spike` | A1 spike (measurement only, no processor yet) | 1 commit, off the above |
+| `feature/stereo-output` | B3 stereo rebuild, `wants_stereo`, C1, C2, C3, C4, C7, C8, E1 | **13 commits, unpushed** |
+| `feat/separator-spike` | A1 spike (measurement only, no processor yet) | 2 commits, off the above |
 | `feature/windows-packaging` | installer scaffolding | not merged — app can't run on Windows (D3) |
 
 Pushing needs to happen from a machine with credentials — this session had
