@@ -10,6 +10,7 @@ when the output device changes (Bluetooth headset reconnects etc.).
 """
 
 import json
+import os
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -84,6 +85,12 @@ class App:
         self.status.pack(pady=(4, 10))
 
         self.enabled = False
+        # The capture diagnosis costs a pw-dump, and the states it catches
+        # are structural — they do not appear and clear on their own between
+        # ticks — so it runs every CAPTURE_CHECK_TICKS seconds rather than
+        # every one. Fast enough that nobody sits in a feedback loop for
+        # long, cheap enough to leave on permanently.
+        self._capture_tick = 0
         RoutingSession.recover_stale()
         self._refresh_outputs()
         self.root.after(1000, self._tick)
@@ -407,6 +414,63 @@ class App:
                 self.engine = None
             messagebox.showerror("Enable failed", str(e))
 
+    # How often to verify what we are capturing, in ticks (~1 s each).
+    CAPTURE_CHECK_TICKS = 5
+
+    def _check_capture(self) -> bool:
+        """Verify the audio reaching the model is the audio we intended.
+
+        Returns True if it acted (caller should stop this tick). See
+        backends/base.py diagnose_capture() for why liveness is not enough:
+        a capture stream can be alive, healthy, and wired to the wrong
+        thing, and stream_ok reports it as fine because it is fine — it is
+        just fine about the wrong signal.
+        """
+        try:
+            state = self.routing.diagnose_capture(os.getpid())
+        except Exception:  # noqa: BLE001 — a diagnosis that cannot run must
+            # never take the app down with it; the audio path is unaffected
+            # by our inability to inspect the graph.
+            return False
+
+        if state is None:
+            return False
+
+        if state == "feedback_loop":
+            # No repair attempt here, deliberately. Re-pinning takes up to
+            # 3 s of graph polling, and every one of those seconds is spent
+            # howling: our output is feeding our input and compounding. The
+            # loop is also evidence the targeting is already broken, so the
+            # repair would likely fail anyway. Stop first, explain, let the
+            # user switch back on.
+            self._turn_off()
+            self.status.config(
+                text="feedback loop detected (capturing our own output) — turned off")
+            return True
+
+        if state == "trap_lost":
+            self._turn_off()
+            self.status.config(
+                text="audio device disappeared — turned off, switch back on to rebuild")
+            return True
+
+        # capture_hijacked: wrong source, but not a loop, so nothing is
+        # getting worse while we try to fix it in place.
+        repaired = False
+        try:
+            repaired = self.routing.pin_stream(
+                os.getpid(), self.routing.monitor_source,
+                self.routing.real.name if self.routing.real else "")
+        except Exception:  # noqa: BLE001 — fall through to turning off
+            repaired = False
+        if repaired:
+            self.status.config(text="capture was mis-routed — reconnected")
+            return False
+        self._turn_off()
+        self.status.config(
+            text="capture is connected to the wrong device — turned off")
+        return True
+
     def _turn_off(self):
         if self.engine:
             self.engine.stop()
@@ -466,6 +530,23 @@ class App:
             elif event == "real_sink_lost":
                 self._turn_off()
                 self.status.config(text="output device lost — turned off")
+                return
+            elif event == "trap_lost":
+                # Our interception device is gone from the system (crash,
+                # a PipeWire restart, someone else's cleanup). Nothing is
+                # left to re-assert, and audio is already reaching the
+                # speakers directly, so off is both the correct state and
+                # the current one — say so rather than pretending to filter.
+                self._turn_off()
+                self.status.config(
+                    text="audio device disappeared — turned off, switch back on to rebuild")
+                return
+
+            self._capture_tick += 1
+            if self._capture_tick >= self.CAPTURE_CHECK_TICKS:
+                self._capture_tick = 0
+                if self._check_capture():
+                    return
             s = self.engine.stats if self.engine else None
             if s:
                 out = self.routing.real.description or self.routing.real.name \

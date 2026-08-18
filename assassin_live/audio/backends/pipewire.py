@@ -30,7 +30,16 @@ def _run(cmd: list[str]) -> str:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
 
 
-def _pw_dump(type_suffix: str) -> list[dict]:
+def _pw_dump_all() -> list[dict]:
+    """Every object in one graph snapshot.
+
+    Callers that need more than one object type (nodes *and* links *and*
+    clients, as the capture diagnosis does) must share a single snapshot:
+    three separate pw-dump calls are three different moments, and a graph
+    that changes between them yields link endpoints referring to node ids
+    that are not in the node list — which reads as "capture is connected to
+    nothing" rather than as the race it is.
+    """
     # pw-dump emits one JSON array per graph snapshot; if the graph changes
     # mid-dump it appends further arrays, so parse them all.
     try:
@@ -47,7 +56,74 @@ def _pw_dump(type_suffix: str) -> list[dict]:
         pos = end
         while pos < len(text) and text[pos] in " \t\r\n":
             pos += 1
-    return [o for o in objs if o.get("type", "").endswith(type_suffix)]
+    return objs
+
+
+def _pw_dump(type_suffix: str) -> list[dict]:
+    return [o for o in _pw_dump_all() if o.get("type", "").endswith(type_suffix)]
+
+
+def _props(obj: dict) -> dict:
+    return obj.get("info", {}).get("props", {}) or {}
+
+
+def _of_type(objs: list[dict], suffix: str) -> list[dict]:
+    return [o for o in objs if o.get("type", "").endswith(suffix)]
+
+
+def diagnose_capture(objs: list[dict], pid: int, trap_name: str,
+                     playback_name: str | None) -> str | None:
+    """What is this process's capture stream actually connected to?
+
+    Pure function over one pw-dump snapshot so it is testable without a
+    graph. Returns None when the capture is wired as intended (or when
+    there is nothing to judge yet), else one of:
+
+      'trap_lost'         the trap sink is gone from the graph entirely.
+                          Everything downstream follows from this, so it is
+                          reported first and separately.
+      'feedback_loop'     capture is linked to the monitor of the very sink
+                          we play into. Output feeds input feeds output; it
+                          is audible immediately and gets worse, never
+                          better. Unconditionally wrong for this app.
+      'capture_hijacked'  capture is linked to something that is neither the
+                          trap nor the playback sink — the filter is
+                          processing audio nobody asked it to process.
+
+    WHY THIS EXISTS (2026-08-18): the trap sink was destroyed under a
+    running instance. WirePlumber did the reasonable thing and re-attached
+    the orphaned capture stream to the current default sink's monitor --
+    which is the sink we play into -- and the app ran as a feedback loop
+    until it was killed. `stream_ok` stayed True throughout, correctly: the
+    stream was alive and healthy, it was simply connected to the wrong
+    thing. Liveness was never the property worth checking.
+    """
+    nodes = _of_type(objs, ":Node")
+    name_by_id = {n["id"]: _props(n).get("node.name", "") for n in nodes}
+    if trap_name not in name_by_id.values():
+        return "trap_lost"
+
+    ours = {o["id"] for o in _of_type(objs, ":Client")
+            if _props(o).get("pipewire.sec.pid") == pid}
+    capture_ids = {n["id"] for n in nodes
+                   if _props(n).get("client.id") in ours
+                   and _props(n).get("media.class") == "Stream/Input/Audio"}
+    if not capture_ids:
+        return None      # stream not open yet — nothing to judge
+
+    peers = {name_by_id.get(_props(link).get("link.output.node"))
+             for link in _of_type(objs, ":Link")
+             if _props(link).get("link.input.node") in capture_ids}
+    peers.discard(None)
+    peers.discard("")
+    if not peers or peers == {trap_name}:
+        return None      # not linked yet, or linked exactly as intended
+
+    # Checked before the generic case: a loop is the one that damages the
+    # user's ears rather than merely producing wrong audio.
+    if playback_name and playback_name in peers:
+        return "feedback_loop"
+    return "capture_hijacked"
 
 
 def _pw_dump_nodes() -> list[dict]:
@@ -233,11 +309,22 @@ class PipeWireBackend:
 
     # -- supervision ----------------------------------------------------------
     def check(self) -> str | None:
-        """Returns None (all good), 'real_sink_changed', or 'real_sink_lost'."""
+        """Returns None (all good), 'real_sink_changed', 'real_sink_lost',
+        or 'trap_lost'."""
         if not self.trap:
             return None
         default = get_default_sink()
         if default is None or default.name != SINK_NAME:
+            # The trap being *gone* and the default merely being *stolen*
+            # are indistinguishable from the default sink alone, and they
+            # need opposite responses: stop, vs. re-assert. Tell them apart
+            # before acting -- set_default() on a destroyed node id fails
+            # silently and would be retried every second forever while the
+            # app reported itself healthy. Costs nothing in the common case
+            # because a live trap that is still the default never reaches
+            # this branch.
+            if not find_sinks_named(SINK_NAME):
+                return "trap_lost"
             # Something (BT reconnect, a system output picker, WirePlumber's
             # own default-sink logic) stole the default — always re-assert
             # the trap immediately so the filter never sits bypassed, but
@@ -262,6 +349,21 @@ class PipeWireBackend:
                 (s for s in list_sinks() if s.name != SINK_NAME), None)
             return "real_sink_changed" if self.real else "real_sink_lost"
         return None
+
+    def diagnose_capture(self, pid: int) -> str | None:
+        """Structural check on what we are actually capturing.
+
+        See the module-level diagnose_capture() for the states and for the
+        incident that motivated it. Kept separate from check() because it
+        needs the caller's pid and one more graph snapshot, and because it
+        answers a different question: check() asks "is the routing we set up
+        still in force", this asks "is the audio reaching the model the
+        audio we intended".
+        """
+        if not self.trap:
+            return None
+        return diagnose_capture(_pw_dump_all(), pid, SINK_NAME,
+                                self.real.name if self.real else None)
 
     @property
     def monitor_source(self) -> str:

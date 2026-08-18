@@ -130,11 +130,20 @@ monitor — which the app also plays into — producing an audio feedback loop
 that ran until the app was killed. `stream_ok` stayed true throughout: the
 stream was alive and healthy, just wired to the wrong thing.
 
-Two follow-ups, both now in ROADMAP C8: the app should verify *what* it is
-capturing (not just that the stream lives) and should structurally refuse to
-capture the monitor of the sink it plays into; and this test should either
-refuse to run while the app is alive or be renamed, because the rest of the
-offline suite genuinely is hardware-free and this one hides among them.
+**Both follow-ups are fixed as of 2026-08-18 (ROADMAP C8).** The app now
+verifies *what* it is capturing every ~5 s, not just that the stream lives:
+`diagnose_capture()` reports `trap_lost`, `feedback_loop` (capturing the
+monitor of the sink we play into) or `capture_hijacked`, and the UI turns off
+on a loop immediately rather than attempting a repair that would spend 3 s
+howling. `check()` also now tells "the trap is gone" apart from "something
+stole the default" — it used to conflate them and call `set_default()` on a
+destroyed node id once a second, forever, while reporting healthy. And
+`test_routing_dry.py` refuses to run when it finds a live instance
+(`ALLOW_LIVE=1` overrides).
+
+Still true, and worth keeping in mind: **that test is not hardware-free** and
+should not be run casually just because it sits in `tests/`. The guard covers
+the case it caused; it does not make the test safe in general.
 
 ## Immediate next actions
 
@@ -154,9 +163,8 @@ offline suite genuinely is hardware-free and this one hides among them.
    only thing standing between the −161 dB image collapse and it being
    fixed for real; the code is written and tested.
 4. Then Phase 2 in the roadmap: **C1** gapless device switching (the
-   originally reported pain point), **C8** capture-stream verification (new,
-   a correctness bug — see the incident above), **C2** volume forwarding,
-   **C4** a human-readable status line.
+   originally reported pain point), **C2** volume forwarding, **C4** a
+   human-readable status line. (**C8** is done — see above.)
 
 The **stereo processor contract** that previous handovers flagged as buried
 inside A1 is no longer a blocker: `wants_stereo` landed 2026-08-18, so A1 can

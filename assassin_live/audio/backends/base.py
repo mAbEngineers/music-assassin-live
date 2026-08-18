@@ -57,8 +57,30 @@ class RoutingBackend(Protocol):
         ...
 
     def check(self) -> "str | None":
-        """Returns None (all good), 'real_sink_changed', or
-        'real_sink_lost'."""
+        """Returns None (all good), 'real_sink_changed', 'real_sink_lost',
+        or 'trap_lost' (the interception device itself is gone from the
+        system — nothing can be re-asserted, the session has to be rebuilt
+        or stopped)."""
+        ...
+
+    def diagnose_capture(self, pid: int) -> "str | None":
+        """Is the audio reaching the processor the audio we intended?
+
+        check() asks whether the routing we *set up* is still in force;
+        this asks whether what we are *capturing* is still what we meant to
+        capture. They come apart: a platform is free to re-attach an
+        orphaned capture stream somewhere else entirely, leaving a stream
+        that is alive, healthy, and wired to the wrong thing.
+
+        Returns None when correct or not yet judgeable, else 'trap_lost',
+        'feedback_loop' (capturing the monitor of the device we play into —
+        output feeds input, unconditionally wrong and audible), or
+        'capture_hijacked' (capturing something else entirely).
+
+        Every platform that intercepts audio can reach these states, so this
+        belongs on the interface rather than in the PipeWire backend alone;
+        a backend with no way to inspect its graph may return None always.
+        """
         ...
 
     @property

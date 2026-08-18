@@ -864,7 +864,7 @@ Nothing in the UI states the added latency (~45–70 ms by design). For anyone
 watching video this is the first thing they'll want to know, and it becomes
 critical if A1 lands with a chunk-size-driven latency budget.
 
-### C8. Detect an orphaned or hijacked capture stream ⭐ found the hard way
+### C8. Detect an orphaned or hijacked capture stream ✅ done 2026-08-18
 
 **Incident, 2026-08-18.** `tests/test_routing_dry.py` was run on a machine
 where the app was already filtering. Its cleanup step destroyed what it
@@ -903,6 +903,57 @@ running instance's sink. Either it should refuse to run when a
 `music-assassin-live` process is alive, or it should be renamed so nobody
 reads it as hardware-free again. The offline suite's other members genuinely
 are hardware-free; this one is the odd member and the name hides it.
+
+**Built 2026-08-18.** `diagnose_capture()` in `backends/pipewire.py` is a
+pure function over one `pw-dump` snapshot — one snapshot rather than three,
+because nodes, links and clients read separately are three different moments
+and a graph that moves between them reports "capture is connected to nothing"
+instead of the race it is. It returns:
+
+| state | meaning | response |
+|---|---|---|
+| `trap_lost` | the trap sink is gone from the graph | turn off — nothing is left to re-assert, and audio already reaches the speakers directly, so off is both the correct state and the current one |
+| `feedback_loop` | capture is linked to the monitor of the sink we play into | turn off **immediately**, no repair attempt |
+| `capture_hijacked` | capture is linked to something that is neither | try `pin_stream()` once; turn off if it fails |
+
+`feedback_loop` gets no repair attempt on purpose: re-pinning polls the graph
+for up to 3 s, and every one of those seconds is spent howling and
+compounding. The loop is also itself evidence the targeting is broken, so the
+repair would most likely fail anyway.
+
+Two supporting changes. **`check()` now distinguishes "the trap is gone" from
+"something stole the default"** — indistinguishable from the default sink
+alone, but needing opposite responses, and previously conflated: `check()`
+would call `set_default()` on a destroyed node id, which fails silently, once
+a second, forever, while the app reported itself healthy. Free in the common
+case, since a live trap that is still the default never reaches that branch.
+And **`diagnose_capture` is on the `RoutingBackend` protocol**, not just the
+PipeWire backend — every platform that intercepts audio can reach these
+states, and a backend that cannot inspect its graph may return `None` always.
+
+The UI runs it every 5 ticks (~5 s) rather than every tick: these states are
+structural, they do not appear and clear between ticks, and the check costs a
+`pw-dump`. Fast enough that nobody sits in a loop for long, cheap enough to
+leave on permanently.
+
+`tests/test_capture_diagnosis.py` covers all of it with no audio graph —
+fixtures copied from the pw-dump the incident actually produced, including
+that another client capturing our output sink's monitor (a recorder, a
+meter, a screen-share) is normal and must not fire. That last one matters:
+a guard that cries wolf gets deleted.
+
+**The hygiene fix landed too:** `test_routing_dry.py` now refuses to run when
+it finds a live instance (`ALLOW_LIVE=1` overrides), and its docstring no
+longer claims to be safe to run while audio is in use. The process match is
+on argv shape, not a substring of the command line — this repository's own
+directory is named `music-assassin-live`, so a substring test matches every
+shell and editor with the repo path in its arguments.
+
+**Not done, deliberately:** `trap_lost` turns the app off rather than
+rebuilding the session in place. Auto-rebuild (`disable()` then `enable()`,
+then restart the engine) is the nicer behaviour and is a small change, but it
+wants to be designed together with C1's retarget path rather than bolted on
+here.
 
 ---
 
@@ -1086,10 +1137,9 @@ entry ticket to a Windows APO later. Not near-term.
     (`audio/stereo.py`, plus the `wants_stereo` seam A1 needs). **Shipped
     off** — what remains is `scripts/run_b3_sweep.sh` and flipping the
     default on its numbers, not more code. See B3.
-15. **C8 — detect an orphaned/hijacked capture stream.** New, and ahead of
-    the remaining UX items because it is a correctness bug, not polish: the
-    app can end up in an audio feedback loop and report itself healthy
-    throughout. Found by causing it, 2026-08-18. See C8.
+15. ~~**C8 — detect an orphaned/hijacked capture stream.**~~ Done
+    2026-08-18, the same day it was found by causing it. The app no longer
+    reports itself healthy while capturing its own output. See C8.
 16. **C3 — coherent system-picker behavior**, **C4 — human status line.**
 17. **E1 — CI** (scoped smaller than it looks; see E1).
 
