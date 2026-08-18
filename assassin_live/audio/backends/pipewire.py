@@ -181,9 +181,16 @@ def create_trap_sink(timeout_s: float = 3.0) -> SinkInfo:
     raise RuntimeError("trap sink did not appear in the PipeWire graph")
 
 
-def pin_process_streams(pid: int, capture_sink: str, playback_sink: str,
+def pin_process_streams(pid: int, capture_sink: str | None, playback_sink: str,
                         timeout_s: float = 3.0) -> bool:
     """Point this process's audio streams at explicit sinks.
+
+    capture_sink=None targets the playback stream only and leaves the
+    capture stream's target untouched. That is what an output-device change
+    needs (C1): the capture side and the model are unaffected by where the
+    result is played, so re-asserting the capture target would be at best a
+    no-op and at worst an unnecessary relink on the one path that must not
+    be interrupted.
 
     PortAudio's "pulse" device usually resolves to the PipeWire ALSA plugin
     (pipewire-alsa, the Ubuntu 24.04 default), which ignores
@@ -199,10 +206,11 @@ def pin_process_streams(pid: int, capture_sink: str, playback_sink: str,
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        wanted = {playback_sink} | ({capture_sink} if capture_sink else set())
         serials = {}
         for node in _pw_dump_nodes():
             props = node.get("info", {}).get("props", {})
-            if props.get("node.name") in (capture_sink, playback_sink):
+            if props.get("node.name") in wanted:
                 serials[props["node.name"]] = props.get("object.serial")
         our_clients = {
             o["id"] for o in _pw_dump(":Client")
@@ -217,11 +225,12 @@ def pin_process_streams(pid: int, capture_sink: str, playback_sink: str,
                 cap_node = node["id"]
             elif props.get("media.class") == "Stream/Output/Audio":
                 play_node = node["id"]
-        if (cap_node and play_node
-                and serials.get(capture_sink) is not None
-                and serials.get(playback_sink) is not None):
-            for node_id, sink in ((cap_node, capture_sink),
-                                  (play_node, playback_sink)):
+        targets = [(play_node, playback_sink)]
+        if capture_sink is not None:
+            targets.append((cap_node, capture_sink))
+        if all(node_id and serials.get(sink) is not None
+               for node_id, sink in targets):
+            for node_id, sink in targets:
                 subprocess.run(
                     ["pw-metadata", str(node_id), "target.object",
                      str(serials[sink])],
@@ -349,6 +358,30 @@ class PipeWireBackend:
                 (s for s in list_sinks() if s.name != SINK_NAME), None)
             return "real_sink_changed" if self.real else "real_sink_lost"
         return None
+
+    def retarget_playback(self, pid: int, sink_name: str) -> bool:
+        """Move a RUNNING stream's playback endpoint, without closing it.
+
+        This is C1's whole point. Today an output change goes through
+        AudioEngine.retarget() == stop() + start(): PortAudio teardown,
+        sd._terminate()/_initialize(), processor reset(), every buffer
+        cleared, then up to 3 s of graph polling — a multi-second dropout
+        and a model that has forgotten everything, for a change that does
+        not concern the capture side or the model at all.
+
+        The mechanism needed already existed: pin_process_streams() sets
+        target.object on our stream nodes, and WirePlumber relinks them.
+        Nothing was calling it on a stream that was already running. So the
+        live path is the same metadata write, aimed at one node instead of
+        two, with the capture side deliberately untouched.
+
+        Returns False if the write could not be made (node not found, sink
+        gone). False means "fall back to the full retarget", not "failed" —
+        callers must keep that path, because whether WirePlumber honours a
+        target change on an already-linked stream is a property of the
+        running system, not something this code can guarantee.
+        """
+        return pin_process_streams(pid, None, sink_name)
 
     def diagnose_capture(self, pid: int) -> str | None:
         """Structural check on what we are actually capturing.

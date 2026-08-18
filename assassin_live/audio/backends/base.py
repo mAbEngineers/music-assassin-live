@@ -63,6 +63,24 @@ class RoutingBackend(Protocol):
         or stopped)."""
         ...
 
+    def retarget_playback(self, pid: int, sink_name: str) -> bool:
+        """Move a running stream's playback endpoint to `sink_name` without
+        closing it, leaving capture and the processor's state alone.
+
+        Separate from pin_stream() even where a platform implements both the
+        same way, because they answer different questions and will diverge:
+        pin_stream is a best-effort fixup for a stream that just opened,
+        this is a live move of one that is mid-playback. On Windows the
+        first may be a no-op while this one is a real device switch.
+
+        Returns False when the move could not be made — which means "use the
+        stop/start path instead", not "the audio is broken". Callers must
+        keep that fallback: whether a platform honours a retarget on an
+        already-linked stream is a property of the running system, not a
+        guarantee this interface can make.
+        """
+        ...
+
     def diagnose_capture(self, pid: int) -> "str | None":
         """Is the audio reaching the processor the audio we intended?
 

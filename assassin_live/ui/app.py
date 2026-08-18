@@ -518,6 +518,16 @@ class App:
             event = self.routing.check()
             if event == "real_sink_changed" and self.routing.real:
                 try:
+                    # Try to move only the playback endpoint first (C1): the
+                    # capture side and the model are unaffected by where the
+                    # result is played, so the multi-second teardown below is
+                    # the wrong tool for this whenever the live move works.
+                    if self.engine.retarget_output(self.routing.real.name):
+                        self.status.config(
+                            text=f"switched output → "
+                                 f"{self.routing.real.description or self.routing.real.name}")
+                        self.root.after(1000, self._tick)
+                        return
                     self.engine.retarget(self.routing.monitor_source,
                                          self.routing.real.name)
                 except Exception as e:  # noqa: BLE001 — a broken stream must not

@@ -774,7 +774,7 @@ A1 produces a working separator, not before.
 
 This is where the app currently feels like a prototype rather than a product.
 
-### C1. Gapless output-device switching ⭐ the named pain point
+### C1. Gapless output-device switching — built 2026-08-18, spike not yet run
 
 Today, changing output device — from the app's dropdown *or* from the system
 audio picker — calls `AudioEngine.retarget()`, which is `stop()` + `start()`:
@@ -799,6 +799,46 @@ Fallbacks if that doesn't work, in order:
 Note the `PULSE_SINK`/`_reinit_portaudio()` machinery exists *only* because
 pipewire-alsa ignores those env vars; if metadata retargeting works on a live
 stream, that whole path becomes dead weight.
+
+**Built 2026-08-18, pending the spike.** The mechanism turned out to already
+exist: `pin_process_streams()` writes `target.object` on our stream nodes and
+WirePlumber relinks them — nothing was ever calling it on a stream that was
+already running. So the live path is the same metadata write, aimed at one
+node instead of two, with the capture side deliberately left alone
+(`pin_process_streams(pid, capture_sink=None, ...)`) because an output change
+does not concern capture or the model, and re-asserting the capture target
+would be at best a no-op and at worst an unnecessary relink on the one path
+that must not be interrupted.
+
+- `PipeWireBackend.retarget_playback(pid, sink_name)` — the live move.
+- `AudioEngine.retarget_output(sink_name)` — returns False rather than
+  falling back on its own, because the *caller* is what knows whether a
+  heavyweight rebuild is acceptable at that moment.
+- The UI tries it first on `real_sink_changed` and drops to `retarget()`
+  when it returns False. It also finally says something ("switched output →
+  X") where C3 complains there is no feedback.
+- On the `RoutingBackend` protocol, separate from `pin_stream()` even though
+  PipeWire implements both the same way: they answer different questions and
+  will diverge (on Windows the first may be a no-op while this is a real
+  device switch).
+
+`tests/test_retarget_live.py` asserts the thing that actually matters — after
+a live retarget the processor has **not** been reset, the buffers still hold
+what they held, and the stream object is the same one. A version that
+returned True while resetting the model would pass a naive test and still be
+the bug. Every failure mode (backend says no, backend raises, backend
+predates C1, stream already dead, no backend) falls back rather than breaking.
+
+**What no test can answer, and the spike must:** whether WirePlumber honours
+a target change on a stream that is *already linked and playing*. That is a
+property of the running system. `scripts/spike_c1_retarget.py` creates two
+null sinks of its own, plays silence into one, moves the live stream to the
+other, and reports whether the link moved, how long it took, whether the
+callback kept firing, and the worst callback gap. It destroys only the node
+ids it created — never a sweep by name, which is precisely how C8's incident
+happened. If the link moves but the worst gap is far over one block period,
+routing is seamless while audio is not, and C1's next rung (ramp wet to 0
+across the switch) is still needed.
 
 ### C2. Forward volume keys to the real sink
 

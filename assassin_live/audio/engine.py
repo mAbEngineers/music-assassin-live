@@ -282,9 +282,34 @@ class AudioEngine:
         self._wet_gain = 0.0
 
     def retarget(self, monitor_source: str, sink_name: str) -> None:
-        """Output device changed (headset plugged/unplugged)."""
+        """Output device changed (headset plugged/unplugged).
+
+        The heavy path: full teardown and rebuild. Try retarget_output()
+        first — this one costs a multi-second dropout and a reset model.
+        """
         self.stop()
         self.start(monitor_source, sink_name)
+
+    def retarget_output(self, sink_name: str) -> bool:
+        """Move just the playback endpoint, keeping the stream, the model's
+        hidden state and every buffer alive (ROADMAP C1).
+
+        An output change does not concern the capture side or the processor,
+        so nothing about them needs to be disturbed. Returns False if the
+        live move was not possible, meaning the caller should fall back to
+        retarget(); it deliberately does not fall back on its own, because
+        the caller is the one that knows whether a heavyweight rebuild is
+        acceptable right now.
+        """
+        if self._backend is None or not self.stream_ok:
+            return False
+        mover = getattr(self._backend, "retarget_playback", None)
+        if mover is None:
+            return False           # backend predates C1; heavy path only
+        try:
+            return bool(mover(os.getpid(), sink_name))
+        except Exception:  # noqa: BLE001 — any failure just means "fall back"
+            return False
 
     # -- audio path ------------------------------------------------------------
     def _callback(self, indata, outdata, frames, _time, status) -> None:
