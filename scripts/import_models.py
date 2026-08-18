@@ -14,6 +14,15 @@ from assassin_live.paths import data_dir  # noqa: E402
 FILES = ["gtcrn_simple.onnx", "dpdfnet_baseline.onnx", "dpdfnet2_48khz_hr.onnx",
         "dtln_model_1.onnx", "dtln_model_2.onnx", "speechdenoiser.onnx"]
 
+# Copied under a different name than upstream ships. Spleeter's two files are
+# called vocals.int8.onnx / accompaniment.int8.onnx, which say nothing about
+# which model they belong to once they are sitting in a flat models dir
+# alongside six others -- and the registry looks them up by name.
+RENAMED = {
+    "vocals.int8.onnx": "spleeter_vocals.int8.onnx",
+    "accompaniment.int8.onnx": "spleeter_accompaniment.int8.onnx",
+}
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -26,15 +35,17 @@ def main():
     target = data_dir() / "models"
     target.mkdir(parents=True, exist_ok=True)
     copied = 0
-    for f in FILES:
-        matches = sorted(args.source.rglob(f))
+    wanted = [(f, f) for f in FILES] + list(RENAMED.items())
+    for src_name, dst_name in wanted:
+        matches = sorted(args.source.rglob(src_name))
         if matches:
-            shutil.copy2(matches[0], target / f)
-            print(f"  {f}  ->  {target}  (from {matches[0].relative_to(args.source)})")
+            shutil.copy2(matches[0], target / dst_name)
+            print(f"  {dst_name}  ->  {target}  "
+                  f"(from {matches[0].relative_to(args.source)})")
             copied += 1
         else:
-            print(f"  {f}  MISSING under {args.source}")
-    print(f"{copied}/{len(FILES)} models installed to {target}")
+            print(f"  {dst_name}  MISSING under {args.source}")
+    print(f"{copied}/{len(wanted)} models installed to {target}")
 
 
 if __name__ == "__main__":

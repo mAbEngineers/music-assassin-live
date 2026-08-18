@@ -49,17 +49,27 @@ done
 
 echo
 echo "== needs the ONNX models =="
-printf '  %-26s ' "test_processors_offline"
-if out=$("$PY" tests/test_processors_offline.py 2>&1); then
-  echo "PASS"
-elif grep -q "NOTHING TESTED" <<<"$out"; then
-  echo "SKIPPED (no models installed)"
-  skipped+=("test_processors_offline")
-else
-  echo "FAIL"
-  echo "$out" | sed 's/^/      /'
-  fail=1
-fi
+# test_spleeter_chunking additionally needs sherpa-onnx, which is NOT an app
+# dependency (ROADMAP A1, processors/spleeter.py) -- so it skips on this
+# venv and runs on the research one. Both report NOTHING TESTED rather than
+# passing empty, which is what the SKIPPED branch keys on.
+MODEL_TESTS=(
+  test_processors_offline   # every installed processor's feed() contract
+  test_spleeter_chunking    # A1's separator wrapper: quantum, edges, lag
+)
+for t in "${MODEL_TESTS[@]}"; do
+  printf '  %-26s ' "$t"
+  if out=$("$PY" "tests/$t.py" 2>&1); then
+    echo "PASS"
+  elif grep -q "NOTHING TESTED" <<<"$out"; then
+    echo "SKIPPED (models not installed)"
+    skipped+=("$t")
+  else
+    echo "FAIL"
+    echo "$out" | sed 's/^/      /'
+    fail=1
+  fi
+done
 
 echo
 if [ ${#skipped[@]} -gt 0 ]; then

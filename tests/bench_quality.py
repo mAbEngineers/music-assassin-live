@@ -379,6 +379,11 @@ def run_chain(cfg: dict, x: np.ndarray,
     _callback_body() are applied afterwards by the caller, once latency
     alignment is known.
 
+    A `wants_stereo` processor (ROADMAP A1) takes the second path the engine
+    has, _wet_stereo_proc: the pair goes in untouched, so there is no
+    downmix, no mid/side and no rebuild, and the mono return is the downmix
+    of what the processor produced.
+
     Returns (wet_mono, wet_stereo | None, perf). Every separation metric runs
     on the mono signal (correct — the reference stems are mono), so the mono
     return stays the primary one whether or not the rebuild is on; the stereo
@@ -390,14 +395,21 @@ def run_chain(cfg: dict, x: np.ndarray,
     if setter:
         setter(cfg["atten_db"])
 
+    # A wants_stereo processor consumes the pair itself, so its resamplers
+    # are 2-channel and its band-limit needs a second instance (stateful
+    # IIR — the channels cannot share one). Mirrors AudioEngine's
+    # _build_runtime / _wet_stereo_proc.
+    st_proc = proc.wants_stereo
     if proc.sample_rate != SR:
-        down = soxr.ResampleStream(SR, proc.sample_rate, 1, dtype="float32")
-        up = soxr.ResampleStream(proc.sample_rate, SR, 1, dtype="float32")
+        ch = 2 if st_proc else 1
+        down = soxr.ResampleStream(SR, proc.sample_rate, ch, dtype="float32")
+        up = soxr.ResampleStream(proc.sample_rate, SR, ch, dtype="float32")
     else:
         down = up = None
 
     ms = MidSideFilter(exponent=cfg["midside_exp"]) if cfg["midside"] else None
     bl = BandlimitFilter(SR) if cfg["bandlimit"] else None
+    bl_r = BandlimitFilter(SR) if (cfg["bandlimit"] and st_proc) else None
     reb = StereoRebuild() if cfg["stereo"] else None
 
     # The engine's worker keeps its own dry FIFO for the rebuild, drained by
@@ -408,6 +420,26 @@ def run_chain(cfg: dict, x: np.ndarray,
     for i in range(0, len(x) - BLOCK + 1, BLOCK):
         blk = x[i:i + BLOCK]
         t0 = time.perf_counter()
+        if st_proc:
+            # No downmix, so no image to rebuild and no mid/side — that
+            # filter exists to make a centre-emphasised MONO signal, which is
+            # exactly what this path does not want. cfg["midside"]/["stereo"]
+            # are therefore inert here; sweeping them against a separator
+            # just produces duplicate configs.
+            y = down.resample_chunk(blk) if down is not None else blk
+            y = proc.feed(y)
+            if up is not None and len(y):
+                y = up.resample_chunk(y)
+            if len(y) and bl is not None:
+                y = np.stack([bl.process(y[:, 0]), bl_r.process(y[:, 1])], axis=1)
+            if len(y):
+                out_st.append(y.astype(np.float32))
+                # The separation metrics run against mono reference stems, so
+                # the mono return stays primary — here it is the downmix of
+                # what actually reaches the speakers.
+                out.append(y.mean(axis=1).astype(np.float32))
+            times.append((time.perf_counter() - t0) * 1000.0)
+            continue
         if reb is not None:
             dry_work = np.concatenate([dry_work, blk])
         m = ms.process(blk) if ms is not None else blk.mean(axis=1)
@@ -440,7 +472,10 @@ def run_chain(cfg: dict, x: np.ndarray,
             "ms_per_block_jitter": round(float(t.std()), 2),
             "rtf": round(float(t.mean()) / budget_ms, 3),
             "rtf_p95": round(float(np.percentile(t, 95)) / budget_ms, 3),
-            "budget_overruns": int((t > budget_ms).sum())}
+            "budget_overruns": int((t > budget_ms).sum()),
+            # What the processor SAYS its delay is, which for a chunked
+            # separator is the only honest source. See the note in evaluate().
+            "declared_latency_ms": round(proc.latency_ms, 1)}
     return wet, wet_st, perf
 
 
@@ -968,7 +1003,16 @@ def evaluate(cfg: dict, item: Path, tag: str, mdir: Path,
     m_ref = mono(mus)[off:off + m] * _alpha(tag)
     x_ref = mono(mix)[off:off + m]
 
-    res = {"latency_ms": round(lag / SR * 1000.0, 1), **perf}
+    # Measured lag alone UNDER-REPORTS a chunked processor to zero, and the
+    # >120 ms lip-sync failure tag reads that zero. A chunk-buffering
+    # separator emits output whose first sample still corresponds to input
+    # sample 0 — the delay is in when the samples become AVAILABLE, and
+    # concatenating a whole file offline erases exactly that. Spleeter at a
+    # 1 s chunk measures 0.0 ms here while declaring 1093 ms, which is the
+    # single fact that rules it out of the live path (ROADMAP A1). Take
+    # whichever is worse so the column means what its own legend says.
+    res = {"latency_ms": max(round(lag / SR * 1000.0, 1),
+                             perf["declared_latency_ms"]), **perf}
     res.update(gap_metrics(y, x_ref, v_ref))
     res.update(bss_metrics(y, v_ref, m_ref))
     res["si_sdr_db"] = round(si_sdr(y, v_ref), 2)
@@ -1462,10 +1506,16 @@ def main() -> int:
     mdir = models_dir()
     configs = parse_sweep(args.sweep)
     have = processors.available(mdir)
-    missing = {c["model"] for c in configs} - set(have)
+    # is_available(), not `in have`: the spleeter chunk variants are a sweep
+    # axis and are not enumerated by available() (see processors/__init__.py).
+    missing = {c["model"] for c in configs
+               if not processors.is_available(c["model"], mdir)}
     if missing:
         print(f"model(s) not installed: {', '.join(sorted(missing))}\n"
-              f"available: {', '.join(have)}")
+              f"available: {', '.join(have)}"
+              f" (plus spleeter_<n>ms for n in "
+              f"{', '.join(str(m) for m in processors.SPLEETER_CHUNKS_MS)}"
+              f" when spleeter is installed)")
         return 1
 
     cats = sorted({e.get("category", "general") for e in entries})

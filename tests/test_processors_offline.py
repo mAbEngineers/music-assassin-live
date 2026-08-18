@@ -34,6 +34,11 @@ def run_one(name: str, mdir: Path) -> dict:
     proc = processors.create(name, mdir)
     sr = proc.sample_rate
     x = synth(sr)
+    if proc.wants_stereo:
+        # A separator takes the pair itself (ROADMAP A1). Duplicating the
+        # mono synth is enough for the checks below — they are about the
+        # feed() contract, not about the image.
+        x = np.stack([x, x], axis=1)
 
     # 1) one-shot
     proc.reset()
