@@ -180,6 +180,57 @@ the side channel, in a different column.
 budget over a process that only runs every `chunk_ms`. The spike's table is
 the latency authority.
 
+### A1 sweep — two of three steps in, and the curve never flattens
+
+`~/.local/state/music-assassin/bench/a1`. `chunk_all` (whole corpus) still
+running; the two scoped steps are done and already answer the shape.
+
+`male_lead` (8 clips × 2 ratios), the category where B1 found `dpdfnet_hr`
+weakest and most vocally damaging:
+
+| config | music | vocal | dSI-SDR | musNoise | stereo | lat ms |
+|---|---|---|---|---|---|---|
+| `spleeter_4000ms` | −38.85 | **−0.40** | **8.65** | 21.29 | −12.86 | 4093 |
+| `spleeter_2000ms` | −41.04 | −0.46 | 6.65 | 33.58 | −13.95 | 2093 |
+| `spleeter_1000ms` | −40.51 | −0.53 | 4.77 | 38.98 | −14.75 | 1093 |
+| `spleeter_500ms` | −41.81 | −0.77 | 2.38 | 47.97 | −17.04 | 593 |
+| `dpdfnet_hr` | **−48.38** | −8.47 | 0.33 | **6.81** | −162.98 | 50 |
+| `spleeter_250ms` | −35.54 | −1.43 | 0.13 | 30.72 | −18.56 | 343 |
+
+**dSI-SDR rises monotonically with chunk size and is still rising at 4 s**, on
+both categories swept. The sweep was written to find where it flattens so the
+smallest acceptable chunk could be read off; in this range there is no such
+point. Quality keeps buying latency for as long as you will pay, which
+sharpens A1 rather than settling it — the configs that beat the shipped
+default are the least shippable ones.
+
+**Per-band is where the case actually is.** On `male_lead`,
+sub/low/mid/high/air vocal damage: `dpdfnet_hr` −8.1 / −7.3 / **−11.3** /
+**−11.7** / **−13.0** against `spleeter_4000ms` −0.7 / −0.3 / −0.4 / −1.6 /
+−2.8. `dpdfnet_hr` fires `vocal-loss` 8/16, `hf-loss` 4/16, `hf-loss-4k`
+2/16; no Spleeter config fires any of them. It reaches **1%** of the offline
+ceiling's dSI-SDR here, against 38% for `spleeter_4000ms`. This is not the
+SI-SDR scoring trap — the band table measures the damage directly.
+
+**What Spleeter pays for it:** 7–10 dB less music removed (−39 vs −48) and
+3–7× the musical noise (tag fires 8–15/16 vs 5/16). `long-burst` and
+`pumping` also fire more. So the trade is the mirror image of the shipped
+default's: voice intact, more music left, noisier.
+
+**The chunking penalty is confined below 1 s.** `boundary-sensitive` fires
+16/16 at 250 ms, 12/16 at 500 ms, 5/16 at 1 s, 3/16 at 2 s, 0/16 at 4 s —
+the 8–11 dB chunked-vs-one-shot gap surfacing as an artifact only at small
+chunks. 250 ms is also the only config whose vocal damage is worse than
+`dpdfnet_hr`'s in any band.
+
+On `sparse_acoustic` the same shape holds (dSI-SDR 4.27 → 13.06 across the
+range, `dpdfnet_hr` 9.39) but the gap is far smaller, because `dpdfnet_hr`
+is not damaging voices there — vocal −0.88 rather than −8.47.
+
+**Still needs ears.** Audio is dumped at `a1/audio_sparse` and `a1/audio_male`.
+The open question is the product one: is "voice intact, more music left,
+noisier" better than "music gone, voice chewed"? No metric here settles it.
+
 Environment: sherpa-onnx stays **out** of `requirements.txt` (imported lazily,
 so the app venv is unchanged and the separator simply does not appear there).
 Use `~/Documents/venvs/assassin_venv_v0.4.4_cpu/bin/python` (1.13.4). Models
