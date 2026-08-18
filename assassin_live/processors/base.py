@@ -7,6 +7,14 @@ returns processed mono float32. Because processors buffer internally
 call may differ from the number pushed; the cumulative lag is bounded by
 `latency_samples`.
 
+A processor that sets `wants_stereo = True` is handed (n, 2) instead and
+must return (n, 2) — the engine skips its mono downmix and its stereo
+rebuild entirely for those. Every shipped enhancer is a mono speech model,
+so this exists for the separator work (ROADMAP A1): Spleeter and friends
+are trained on stereo mixtures and crash or degrade on a downmix. Until
+one lands, stereo output is reconstructed around mono processors instead
+(audio/stereo.py); the two paths are mutually exclusive by construction.
+
 The research repo benchmarks candidate models against this same interface
 and promotes winners as ONNX + model_card.json release assets. The app
 never needs code changes for a new model that ships a processor here.
@@ -21,6 +29,7 @@ class StreamProcessor(ABC):
     name: str = "base"
     sample_rate: int = 16000     # rate this processor consumes/produces
     latency_samples: int = 0     # algorithmic delay at sample_rate
+    wants_stereo: bool = False   # True -> feed()/return (n, 2), not (n,)
 
     @abstractmethod
     def reset(self) -> None:
@@ -28,7 +37,10 @@ class StreamProcessor(ABC):
 
     @abstractmethod
     def feed(self, x: np.ndarray) -> np.ndarray:
-        """Push mono float32 samples; return whatever output is ready."""
+        """Push float32 samples; return whatever output is ready.
+
+        Mono (n,) unless `wants_stereo`, in which case (n, 2) both ways.
+        """
 
     @property
     def latency_ms(self) -> float:

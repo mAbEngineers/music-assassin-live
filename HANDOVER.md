@@ -1,6 +1,6 @@
 # Handover — current state
 
-Updated 2026-08-17. **This file is deliberately short.** It covers only where
+Updated 2026-08-18. **This file is deliberately short.** It covers only where
 things stand *right now* and what to do next. The plan, the reasoning, the
 measured findings and the list of dead ends all live in
 [`docs/ROADMAP.md`](docs/ROADMAP.md) — read that before re-deriving anything.
@@ -52,9 +52,8 @@ promising next experiment (ROADMAP B2), not exposed as a default yet.
 
 **Also newly measured, universal: stereo width collapses to −161 dB on every
 single one of 104 pairs, every model, mid/side on or off.** Not occasional —
-every time the filter runs, the output goes fully mono. Promoted to Phase 2 in
-the roadmap (was Phase 3, gated on the separator work; it no longer needs
-that).
+every time the filter runs, the output goes fully mono. **Fixed in code
+2026-08-18 but shipped OFF** — see "The stereo work" below.
 
 **Sharper finding, category breakdown (`male_lead`, 8 clips — added
 specifically to test the 2026-07-24 "cuts girl vocals" complaint from the
@@ -81,6 +80,62 @@ Not yet rendered for the full corpus or for `dtln` vs `dpdfnet_hr` head-to-head
 outside those two categories. Priority listen: `male_lead` — that's where the
 numbers disagree most with the standing default.
 
+## The stereo work (2026-08-18) — built, not yet switched on
+
+**`assassin_live/audio/stereo.py`** rebuilds the stereo image around the
+mono enhancers instead of writing the processed signal to both channels. It
+recovers the chain's implied spectral mask from the audio itself
+(`|Wet| / |Dry_mono|` per bin) and applies that one mask to both original
+channels, so panning is preserved exactly while the model's per-band
+suppression still lands. No processor changes — it works for all four shipped
+models at once. Full reasoning, including why the cheaper side-re-injection
+option was rejected (it hands back the music the model just removed), is in
+ROADMAP B3.
+
+**`StreamProcessor.wants_stereo`** landed with it — the A1 prerequisite the
+previous handover flagged as blocking three items and needing input from
+nobody. A processor that sets it gets `(n, 2)` and returns `(n, 2)`; the
+engine skips both the downmix and the rebuild and builds 2-channel
+resamplers. Nothing shipped sets it; Spleeter will.
+
+**It is OFF by default (`AudioEngine.set_stereo`).** It changes what every
+pipeline sends to the speakers, and §2.2 records what flipping a default on
+an expectation cost last time. The trade is real: width that survives is
+width in bands the model kept, so music sitting in those bands comes back
+too.
+
+**What remains is measurement, not code.** `scripts/run_b3_sweep.sh` —
+whole-corpus `stereo=off,on`, the mid/side interaction, the
+`dual_mono_control` expected-null, and `--dump-audio` for the by-ear pass.
+Flip the default if `stereo_width_db` climbs substantially with
+`music_supp_db` and `delta_si_sdr_db` essentially unmoved and RTF still in
+budget. If suppression drops materially, ship mono and say so in the UI.
+
+Verified without models or hardware (`tests/test_stereo_rebuild.py`, all
+green): unity mask reconstructs the dry pair to 1.8e−07, a fully-suppressing
+chain invents no width, a killed hard-panned band does not leak back, chunk
+size does not change the samples, and end-to-end through `AudioEngine` the
+default still measures the mono collapse (−235 dB) while `set_stereo(True)`
+restores the surviving image. A synthetic-corpus `evaluate()` run moves
+`stereo_width_db` −165.7 → −5.2 dB, clears the `stereo-collapse` tag, and
+leaves every separation metric bit-identical.
+
+## An incident worth reading before running the test suite
+
+`tests/test_routing_dry.py` is named "dry" but **manipulates the live
+PipeWire graph**, and its cleanup step will delete a *running* instance's
+trap sink, judging it stale. That happened on 2026-08-18. PipeWire then
+re-attached the app's orphaned capture stream to the real output sink's
+monitor — which the app also plays into — producing an audio feedback loop
+that ran until the app was killed. `stream_ok` stayed true throughout: the
+stream was alive and healthy, just wired to the wrong thing.
+
+Two follow-ups, both now in ROADMAP C8: the app should verify *what* it is
+capturing (not just that the stream lives) and should structurally refuse to
+capture the monitor of the sink it plays into; and this test should either
+refuse to run while the app is alive or be renamed, because the rest of the
+offline suite genuinely is hardware-free and this one hides among them.
+
 ## Immediate next actions
 
 1. **Listen to the rendered audio.** `~/.local/state/music-assassin/bench/b1/audio_male/`
@@ -94,18 +149,18 @@ numbers disagree most with the standing default.
    release notes should say. The `.deb` is already rebuilt from merged `main`
    (2026-08-15, binary smoke-tested, `speechdenoiser` correctly excluded for
    its unresolved license).
-3. Then Phase 2 in the roadmap: **C1** gapless device switching (the
-   originally reported pain point), **C2** volume forwarding, **B3** stop
-   collapsing to mono (promoted this session — see above), **A6** report
-   input RMS in `bench_offline()` so a repeat of the §2.1 investigation is
-   visible at a glance instead of taking hours.
+3. **Run `scripts/run_b3_sweep.sh`** (detached, same as the B1 sweep) and
+   flip — or don't flip — the stereo default on what it says. This is the
+   only thing standing between the −161 dB image collapse and it being
+   fixed for real; the code is written and tested.
+4. Then Phase 2 in the roadmap: **C1** gapless device switching (the
+   originally reported pain point), **C8** capture-stream verification (new,
+   a correctness bug — see the incident above), **C2** volume forwarding,
+   **C4** a human-readable status line.
 
-Worth reordering ahead of Phase 3 when you get there: the **stereo processor
-contract** (`wants_stereo`, engine stops downmixing) is currently buried inside
-A1, but three separate blocked items sit behind it — A1 (Spleeter crashes on
-mono input), B3 (the mono-output regression, now measured universal), and Q5
-(mono-acceptability stops being a question once stereo is possible). It needs
-no input from anyone.
+The **stereo processor contract** that previous handovers flagged as buried
+inside A1 is no longer a blocker: `wants_stereo` landed 2026-08-18, so A1 can
+hand Spleeter a real stereo pair on day one.
 
 ## Open questions for the user
 
@@ -115,9 +170,16 @@ Listed in full as ROADMAP §10. The ones that block work right now:
   ~50–70 ms and ~500 ms lead to different designs. Gates A1's *conclusion*,
   not its start — the spike's own job is to produce the latency-vs-quality
   curve that answers this, not to be handed the answer up front.
-- **Mono output while filtering** (Q5) — now measured universal, −161 dB,
-  every model, every config. Acceptable for now, or worth engineering around
-  before A1 changes the output path anyway?
+- **Mono output while filtering** (Q5) — mostly overtaken by events: the fix
+  cost one module and no processor changes, so "is it worth engineering
+  around" no longer needs an answer, and the sweep decides the rest. The one
+  judgement left: if the trade turns out bad, is shipping mono *with the UI
+  saying so* acceptable?
+- **Wide-stereo corpus material** — the corpus can prove the rebuild works
+  but not that it fails gracefully (median S/M −8.2 dB, nothing hard-panned
+  or out-of-phase). ~6–10 clips would close it; `bench_quality.py` already
+  reserves the category name `stereo_torture`. Shopping list in ROADMAP
+  §3.1.
 
 ## What got resolved this session (2026-08-16/17)
 

@@ -369,6 +369,25 @@ pop/rock/EDM, no solo-piano-only or fully a cappella-in-the-mix passages, and
 as the OP/EDs by crest factor despite the name — worth knowing when reading
 results, not a defect.
 
+**One gap got sharper when B3 landed (2026-08-18): there is no wide-stereo
+stress material.** The corpus is enough to *prove the stereo rebuild works* —
+success there is `stereo_width_db` climbing off its −161 dB floor on clips
+already separated. What it cannot show is the rebuild failing gracefully,
+because at a median S/M of −8.2 dB these are dense, fairly narrow masters and
+nothing in them is hard-panned, out-of-phase, or binaural. Those are exactly
+the signals that expose a fix which restores width while smearing the image
+or inverting phase, and `dual_mono_control` (2 clips) only covers the
+opposite end. `bench_quality.py` already reserves the name for it —
+`--only-category stereo_torture` appears in its own usage examples — so this
+is a labelled hole, not a new idea. **Worth collecting, ~6–10 clips:** hard
+L/R panned instrument arrangements (classic-era rock mixes are the easy
+source), wide synth/EDM pads, live or binaural recordings with real room
+width, at least one deliberately out-of-phase or heavily chorused track, and
+one wide mix with a *centred* lead so the "voice survives, width survives"
+claim can be checked on the same clip. Same pipeline as the rest: drop the
+files somewhere, `scripts/corpus_excerpt.py`, then `--build-refs --category
+stereo_torture`.
+
 ---
 
 ## 4. Workstream A — De-musicing quality: models
@@ -562,6 +581,30 @@ not a resolution of the original female-vocal complaint (this category is a
 different, adjacent question) but it is a concrete, actionable lead in its
 own right and should weigh heavily in the by-ear pass below.
 
+**Caveat before that comparison is acted on: `dtln`/`gtcrn`'s flattering
+`vocal_ret` on this category is a broadband energy average, and it hides a
+bandwidth collapse the ear will not miss.** The same run's per-band probe, on
+`male_lead` alone:
+
+| band | `dpdfnet_hr` | `gtcrn` | `dtln` |
+|---|---|---|---|
+| sub (0–200 Hz) | −8.1 dB | −2.4 dB | −1.4 dB |
+| low (200 Hz–1 k) | −7.3 dB | −2.2 dB | −0.9 dB |
+| mid (1–4 k) | −11.3 dB | −3.5 dB | −2.0 dB |
+| high (4–8 k) | −11.7 dB | −3.8 dB | −2.4 dB |
+| **air (8–20 k)** | **−13.0 dB** | **−64.7 dB** | **−62.5 dB** |
+
+The 16 kHz-native models destroy the air band outright (their sample-rate
+ceiling, same effect as the whole-corpus −49 dB noted above), but so little
+vocal energy lives there that the broadband `vocal_ret` figure barely moves —
+which is exactly why the aggregate reads −1.6 dB. dSI-SDR does not penalise it
+either. So the male_lead ranking should be read as "`dpdfnet_hr` damages the
+bands that carry the voice more, while `dtln`/`gtcrn` remove the top octave
+entirely" — two different kinds of damage that the summary columns score as
+though they were comparable. **The by-ear pass is what separates them, and it
+should be done on headphones or full-range monitors; anything that rolls off
+early will not reproduce the difference this caveat is about.**
+
 **An anomaly in the `dual_mono_control` category (n=4 pairs, expected-negative
 — these clips have no real side channel, S/M ≤ −44 dB), flagged rather than
 explained away:** turning mid/side ON makes vocal retention measurably *worse*
@@ -595,7 +638,7 @@ worse than off. If a lower exponent finds a real win, a slider (rather than a
 fixed value) is still the right shape, since content-dependence is real —
 but tune the shipped default first.
 
-### B3. Stop collapsing output to mono ⭐ now measured, not just theoretical
+### B3. Stop collapsing output to mono — built 2026-08-18, measurement still open
 
 `AudioEngine._callback_body()` writes the mono wet signal to both output
 channels (`wet[:,0] = wet[:,1] = wet_mono`). **At 100 % mix the entire system
@@ -610,7 +653,7 @@ single time the filter is active. This is now the single most consistently
 measured defect in the whole corpus (the only failure tag that fires 100 % of
 the time across every configuration tested).
 
-Options, cheapest first:
+Options, cheapest first, as originally written:
 - Apply the model's per-band gain to the original stereo pair instead of
   emitting mono (requires the processor to expose a mask, not just audio —
   not all do).
@@ -619,6 +662,90 @@ Options, cheapest first:
   Conflicts conceptually with mid/side prefiltering, which is *removing* the
   side channel on purpose — so these two need to be designed together.
 - Accept mono, but say so in the UI.
+
+**Built 2026-08-18: `assassin_live/audio/stereo.py`, a variant of the first
+option that does not need the processors to expose anything.** The mask is
+recovered from the audio the chain already produces rather than from the
+model's internals:
+
+    mask[k] = |Wet[k]| / |Dry_mono[k]|        per STFT bin, clamped
+    L_out   = istft(mask · stft(L_dry))
+    R_out   = istft(mask · stft(R_dry))
+
+One mask, both channels, so every bin's L:R ratio is preserved exactly — the
+image is the original one, not a synthesised widening — while the model's
+per-band suppression still applies. Bins it zeroed go to zero in both
+channels; bins it kept keep whatever width they had. No processor changes, so
+it works for all four shipped models at once.
+
+**Why not the second option (side re-injection), which was cheaper.** The
+side channel is overwhelmingly the content the model just removed — that is
+the entire premise of `midside.py`, which deletes it on purpose. `L = wet +
+k·S` hands the music back at gain k, and the two features would fight by
+construction. The mask formulation keeps side content only in bands the model
+judged worth keeping, which is the distinction that makes them compatible.
+A test asserts exactly this: a hard-panned band the model killed does not
+reappear (`tests/test_stereo_rebuild.py`).
+
+**Why not a per-sample broadband gain** (`g = wet/dry_mono`, which also
+preserves the image and is far cheaper): it throws away the model's spectral
+selectivity, which is the whole point of a masking enhancer — removing music
+in one band while keeping voice in another *within the same instant*.
+
+**Reusing the dry pair's phase is sound for what ships today**, because all
+four enhancers are magnitude-mask models — a real gain per bin, phase
+untouched. That is independently established: it is why `estimate_lag`'s raw
+waveform correlation resolves to the sample (see its docstring). A future
+non-causal separator that scrambles phase must not go through this path,
+which is what the `wants_stereo` seam below is for.
+
+**Also landed: the `wants_stereo` seam on `StreamProcessor`** (A1's
+prerequisite, called out in the previous handover as blocking three separate
+items and needing input from nobody). A processor setting it is handed
+`(n, 2)` and returns `(n, 2)`; the engine skips both its mono downmix and the
+rebuild, and builds 2-channel resamplers. Nothing shipped sets it — Spleeter
+will. The two paths are mutually exclusive by construction, and mid/side is
+bypassed for stereo processors since its job is producing a *mono*
+centre-emphasised signal for a mono model.
+
+**Shipped OFF (`AudioEngine.set_stereo(False)` is the default).** The rebuild
+changes what every pipeline sends to the speakers, and this project does not
+flip a shipped default on an expectation — §2.2 records what that cost last
+time. The cost is real and needs pricing: width that survives is width in
+bands the model kept, so any music sitting in those bands comes back with it.
+
+**What is still open — the measurement.** `scripts/run_b3_sweep.sh`, same
+detached/resumable shape as the B1 sweep:
+
+| run | what it answers |
+|---|---|
+| `--sweep stereo=off,on` | the headline trade, whole corpus, shipped default model |
+| `--sweep midside=off,on stereo=off,on` | the interaction above — one deletes the side channel, the other restores an image |
+| `--only-category dual_mono_control` | expected-null: nothing to restore, so nothing may be invented (also the category with B1's unexplained anomaly) |
+| `--only-category sparse_acoustic / male_lead` | plus `--dump-audio`, since width is a perceptual claim and belongs in the same by-ear pass as B1 |
+
+Flip the default on those numbers: `stereo_width_db` up substantially with
+`music_supp_db` and `delta_si_sdr_db` essentially unmoved, and RTF still in
+budget. If suppression falls materially instead, the honest answer is the
+third option above — keep mono and say so in the UI.
+
+**Measured cost, 2026-08-18 (same machine as the B1 sweep): 0.13 ms per 20 ms
+block, RTF +0.0065**, negligible beside `dpdfnet_hr`'s 0.38 — so CPU is not
+the axis this decision turns on. **The latency is the cost that matters:
++5.3 ms** of framing delay on top of the model's, which is not free given
+latency is a product constraint here (Q3) and the shipped budget is ~50 ms.
+
+Verified without models or hardware in `tests/test_stereo_rebuild.py`: unity
+mask reconstructs the dry pair to 1.8e−07, a fully-suppressing chain stays
+silent (no width invented from the dry signal), a killed hard-panned band
+does not leak back, chunk size does not change the samples, and end-to-end
+through `AudioEngine` the default still measures the mono collapse
+(−235 dB) while `set_stereo(True)` restores the surviving image (−3.0 dB,
+which is the correct answer for a signal whose width is half in the killed
+band). A synthetic-corpus run of `evaluate()` moves `stereo_width_db` from
+−165.7 dB to −5.2 dB, clears the `stereo-collapse` failure tag, and leaves
+every separation metric bit-identical — the rebuild does not perturb the mono
+numbers, by design.
 
 ### B4. Lookahead + crossfade smoothing — gated on a question
 
@@ -736,6 +863,46 @@ release assets).
 Nothing in the UI states the added latency (~45–70 ms by design). For anyone
 watching video this is the first thing they'll want to know, and it becomes
 critical if A1 lands with a chunk-size-driven latency budget.
+
+### C8. Detect an orphaned or hijacked capture stream ⭐ found the hard way
+
+**Incident, 2026-08-18.** `tests/test_routing_dry.py` was run on a machine
+where the app was already filtering. Its cleanup step destroyed what it
+judged a stale trap sink — that was the *live* app's. PipeWire then did the
+reasonable thing with the app's now-orphaned capture stream and re-attached
+it to the current default sink's monitor. Since the app's playback stream
+feeds that same sink, the result was an audio feedback loop: output → sink →
+monitor → input → model → output, recirculating indefinitely, audible as
+unintelligible speech-like noise (a speech enhancer chewing on its own
+recycled output) that survived everything except killing the app. The app
+never noticed. `stream_ok` stayed true the whole time — the stream *was*
+alive and healthy, it was simply connected to the wrong thing.
+
+Two separate defects, both worth fixing:
+
+- **The app cannot tell what it is capturing.** The supervision loop already
+  polls `stream_ok` every tick; it should also confirm the capture stream is
+  still linked to the trap sink's monitor and not something else. The name is
+  right there in the graph. Mis-targeted capture is not a rare accident —
+  losing the trap sink to a crash, a PipeWire restart, or a user removing it
+  produces the identical state.
+- **Nothing detects the feedback loop itself.** Capturing the monitor of the
+  sink you are playing into is unconditionally wrong for this app and is
+  cheap to spot structurally (compare the capture node's peer against the
+  playback target) rather than by trying to hear it. Worth a hard refusal:
+  disable filtering and say why, rather than emit the noise.
+
+Related to C1/C3 (both are about the app and the graph disagreeing about
+routing) but distinct: those are about *user-initiated* device changes being
+handled ungracefully, this is about the graph changing underneath the app
+without it noticing at all.
+
+**Also a testing-hygiene fix, separately:** `test_routing_dry.py` is named
+"dry" but manipulates the live PipeWire graph and will happily delete a
+running instance's sink. Either it should refuse to run when a
+`music-assassin-live` process is alive, or it should be renamed so nobody
+reads it as hardware-free again. The offline suite's other members genuinely
+are hardware-free; this one is the odd member and the name hides it.
 
 ---
 
@@ -912,14 +1079,19 @@ entry ticket to a Windows APO later. Not near-term.
     live-`pw-metadata`-retarget spike.
 12. **C2 — volume-key forwarding.** Promoted: it is now a suspected
     measurement confound, not only a UX wart (see C2).
-13. **A6 — report input RMS in `bench_offline()`.** Small, and it prevents a
-    repeat of the §2.1 investigation.
-14. **B3 — stop collapsing output to mono.** Also promoted: now a measured
-    universal (−161 dB, 104/104 pairs, every model — see B3), not a
-    theoretical gap. Worth pulling forward from Phase 3, since it no longer
-    needs A1 to be worth fixing — it affects every pipeline shipped today.
-15. **C3 — coherent system-picker behavior**, **C4 — human status line.**
-16. **E1 — CI** (scoped smaller than it looks; see E1).
+13. ~~**A6 — report input RMS in `bench_offline()`.**~~ Done 2026-08-15 —
+    §4 A6 has recorded it as landed since then; this line said otherwise
+    until 2026-08-18.
+14. ~~**B3 — stop collapsing output to mono.**~~ Built 2026-08-18
+    (`audio/stereo.py`, plus the `wants_stereo` seam A1 needs). **Shipped
+    off** — what remains is `scripts/run_b3_sweep.sh` and flipping the
+    default on its numbers, not more code. See B3.
+15. **C8 — detect an orphaned/hijacked capture stream.** New, and ahead of
+    the remaining UX items because it is a correctness bug, not polish: the
+    app can end up in an audio feedback loop and report itself healthy
+    throughout. Found by causing it, 2026-08-18. See C8.
+16. **C3 — coherent system-picker behavior**, **C4 — human status line.**
+17. **E1 — CI** (scoped smaller than it looks; see E1).
 
 ### Phase 3 — Make it actually remove music (weeks)
 
@@ -961,14 +1133,18 @@ chunked separator) lead to different designs.
 **Q4 (blocks D4).** Bundled VB-CABLE (needs the permission email answered) or
 manual-install prompt as the permanent shipped Windows experience?
 
-**Q5 (blocks B3 design).** Is mono output while filtering acceptable for now,
-or is stereo preservation a requirement? It interacts with the mid/side
-prefilter, which removes the side channel by design. **Sharper as of B1
-(2026-08-17):** this is no longer a theoretical corner case — it's measured at
-−161 dB stereo width on 104/104 pairs, every model, every config tested. The
-question isn't whether the regression is real; it's how much engineering to
-spend restoring width given A1 will eventually change the whole output path
-anyway.
+**Q5 (was: blocks B3 design — now largely answered by building it).** Is mono
+output while filtering acceptable, or is stereo preservation a requirement?
+It interacts with the mid/side prefilter, which removes the side channel by
+design. **Sharper as of B1 (2026-08-17):** measured at −161 dB stereo width on
+104/104 pairs, every model, every config tested. **Answered in part as of B3
+(2026-08-18):** the "how much engineering" half is settled — restoring the
+image turned out to cost one 130-line module and no processor changes, which
+is cheap enough that it did not need a decision. What is left is not a
+judgement call but a measurement: `run_b3_sweep.sh` prices the suppression it
+trades for the image, and the default flips on that. The only judgement left
+is the fallback — if the trade is bad, is shipping mono *and saying so in the
+UI* acceptable, or does that make the product not worth shipping?
 
 ---
 

@@ -51,7 +51,7 @@ correspond to *different failure modes* that trade against each other:
     did the vocals survive?     vocal_ret_db, per-band damage, dSI-SDR
     did it add artifacts?       SAR, musical_noise (spectral kurtosis)
     did it glitch?              clicks
-    did it flatten the image?   stereo_width_db
+    did it flatten the image?   stereo_width_db (see `stereo`, ROADMAP B3)
     can it run realtime?        latency_ms, RTF
     what does it sound like?    --dump-audio
 
@@ -80,6 +80,7 @@ USAGE
     python tests/bench_quality.py --sweep model=dpdfnet_hr,gtcrn,dtln \
                                   --sweep midside=off,on
     python tests/bench_quality.py --sweep midside_exp=1,2,4,6 --sort music_supp_db
+    python tests/bench_quality.py --sweep stereo=off,on  # B3, see audio/stereo.py
     python tests/bench_quality.py --only-category stereo_torture
     python tests/bench_quality.py --dump-audio /tmp/ab   # for the by-ear check
 
@@ -131,6 +132,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from assassin_live.audio.bandlimit import BandlimitFilter  # noqa: E402
 from assassin_live.audio.engine import BLOCK, SAMPLE_RATE, _soft_limit  # noqa: E402
 from assassin_live.audio.midside import MidSideFilter  # noqa: E402
+from assassin_live.audio.stereo import StereoRebuild  # noqa: E402
 from assassin_live.paths import models_dir, state_dir  # noqa: E402
 from assassin_live import processors  # noqa: E402
 
@@ -367,13 +369,20 @@ def _demucs(src: Path, out: Path, python: str, model: str) -> dict | None:
 
 # --------------------------------------------------------- the live chain ----
 
-def run_chain(cfg: dict, x: np.ndarray, mdir: Path) -> tuple[np.ndarray, dict]:
+def run_chain(cfg: dict, x: np.ndarray,
+              mdir: Path) -> tuple[np.ndarray, np.ndarray | None, dict]:
     """Push stereo audio through the live processing chain, block by block.
 
     Mirrors AudioEngine._work(): mid/side (or plain mono downmix) -> optional
-    downsample -> processor.feed() -> optional upsample -> band-limit. The
-    wet/dry mix and soft limiter from _callback_body() are applied afterwards
-    by the caller, once latency alignment is known.
+    downsample -> processor.feed() -> optional upsample -> band-limit ->
+    optional stereo rebuild. The wet/dry mix and soft limiter from
+    _callback_body() are applied afterwards by the caller, once latency
+    alignment is known.
+
+    Returns (wet_mono, wet_stereo | None, perf). Every separation metric runs
+    on the mono signal (correct — the reference stems are mono), so the mono
+    return stays the primary one whether or not the rebuild is on; the stereo
+    one exists so stereo_width_db measures what actually reaches the speakers.
     """
     proc = processors.create(cfg["model"], mdir)
     proc.reset()
@@ -389,11 +398,18 @@ def run_chain(cfg: dict, x: np.ndarray, mdir: Path) -> tuple[np.ndarray, dict]:
 
     ms = MidSideFilter(exponent=cfg["midside_exp"]) if cfg["midside"] else None
     bl = BandlimitFilter(SR) if cfg["bandlimit"] else None
+    reb = StereoRebuild() if cfg["stereo"] else None
 
-    out, times = [], []
+    # The engine's worker keeps its own dry FIFO for the rebuild, drained by
+    # exactly what the processor emitted; mirror that here rather than
+    # assuming feed() returns as many samples as it was given (it does not).
+    dry_work = np.zeros((0, 2), dtype=np.float32)
+    out, out_st, times = [], [], []
     for i in range(0, len(x) - BLOCK + 1, BLOCK):
         blk = x[i:i + BLOCK]
         t0 = time.perf_counter()
+        if reb is not None:
+            dry_work = np.concatenate([dry_work, blk])
         m = ms.process(blk) if ms is not None else blk.mean(axis=1)
         if len(m):
             y = down.resample_chunk(m) if down is not None else m
@@ -404,9 +420,15 @@ def run_chain(cfg: dict, x: np.ndarray, mdir: Path) -> tuple[np.ndarray, dict]:
                 y = bl.process(y)
             if len(y):
                 out.append(y.astype(np.float32))
+                if reb is not None:
+                    k = min(len(y), len(dry_work))
+                    dry_st, dry_work = dry_work[:k], dry_work[k:]
+                    if k:
+                        out_st.append(reb.process(dry_st, y[:k]))
         times.append((time.perf_counter() - t0) * 1000.0)
 
     wet = np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
+    wet_st = np.concatenate(out_st) if out_st else None
     t = np.array(times) if times else np.zeros(1)
     budget_ms = 1000.0 * BLOCK / SR
     perf = {"ms_per_block_mean": round(float(t.mean()), 2),
@@ -419,7 +441,7 @@ def run_chain(cfg: dict, x: np.ndarray, mdir: Path) -> tuple[np.ndarray, dict]:
             "rtf": round(float(t.mean()) / budget_ms, 3),
             "rtf_p95": round(float(np.percentile(t, 95)) / budget_ms, 3),
             "budget_overruns": int((t > budget_ms).sum())}
-    return wet, perf
+    return wet, wet_st, perf
 
 
 def _mix_gains(mix_pct: float) -> tuple[float, float]:
@@ -455,13 +477,13 @@ def streaming_consistency(cfg: dict, x: np.ndarray, mdir: Path,
     Reported as dB of difference energy relative to the output itself, so more
     negative = less alignment-sensitive.
     """
-    base, _ = run_chain(cfg, x, mdir)
+    base, _, _ = run_chain(cfg, x, mdir)
     if not len(base):
         return {}
     worst = None
     for k in offsets:
         pad = np.zeros((k, x.shape[1]), dtype=np.float32)
-        shifted, _ = run_chain(cfg, np.concatenate([pad, x]), mdir)
+        shifted, _, _ = run_chain(cfg, np.concatenate([pad, x]), mdir)
         if len(shifted) <= k:
             continue
         a, b = base, shifted[k:]
@@ -484,21 +506,31 @@ def apply_mix(dry: np.ndarray, wet: np.ndarray, mix_pct: float) -> np.ndarray:
     return _soft_limit(mixed) if wet_g > 1.0 else mixed
 
 
-def apply_mix_stereo(dry_st: np.ndarray, wet: np.ndarray,
-                     mix_pct: float) -> np.ndarray:
+def apply_mix_stereo(dry_st: np.ndarray, wet: np.ndarray, mix_pct: float,
+                     wet_st: np.ndarray | None = None) -> np.ndarray:
     """The same blend, but preserving what actually reaches the speakers.
 
-    The engine writes the MONO wet signal to both output channels while the
-    dry path stays stereo, so the stereo image survives only in proportion to
-    how much dry is mixed in — at 100% wet the output is dual-mono and the
-    image collapses entirely. The separation metrics all run on the mono
+    With `stereo` off the engine writes the MONO wet signal to both output
+    channels while the dry path stays stereo, so the stereo image survives
+    only in proportion to how much dry is mixed in — at 100% wet the output
+    is dual-mono and the image collapses entirely (B1 measured exactly that,
+    −161 dB on 104/104 pairs). The separation metrics all run on the mono
     signal (correct — they compare against mono stems), which would hide that
     cost completely, so this reconstruction exists purely to measure it.
+
+    With `stereo` on, `wet_st` is the engine's real stereo output and is used
+    as-is; the same metric then reports how much of the image the rebuild
+    actually gets back, which is the number that decides whether the default
+    flips (audio/stereo.py, ROADMAP B3).
     """
-    n = min(len(dry_st), len(wet))
-    d, w = dry_st[:n], wet[:n, None]
     ramp, wet_g = _mix_gains(mix_pct)
-    mixed = d * (1.0 - ramp) + np.repeat(w, 2, axis=1) * wet_g * ramp
+    if wet_st is not None:
+        n = min(len(dry_st), len(wet_st))
+        mixed = dry_st[:n] * (1.0 - ramp) + wet_st[:n] * wet_g * ramp
+    else:
+        n = min(len(dry_st), len(wet))
+        w = np.repeat(wet[:n, None], 2, axis=1)
+        mixed = dry_st[:n] * (1.0 - ramp) + w * wet_g * ramp
     return _soft_limit(mixed) if wet_g > 1.0 else mixed
 
 
@@ -861,9 +893,13 @@ def oracle_irm(voc: np.ndarray, mus: np.ndarray, mix: np.ndarray,
 
 
 def stereo_width_db(y: np.ndarray, x: np.ndarray) -> float:
-    """Side-channel energy retention. The engine currently emits the mono wet
-    signal to both channels, so a fully-wet config collapses the stereo image
-    entirely — this quantifies that cost."""
+    """Side-channel energy retention.
+
+    With `stereo` off the engine emits the mono wet signal to both channels,
+    so a fully-wet config collapses the image entirely; with it on this reads
+    how much of the image the rebuild recovers. Note 0 dB is not the target
+    under suppression — width that lived in bands the model removed is
+    supposed to go with them (see audio/stereo.py)."""
     n = min(len(y), len(x))
     sy = _energy(y[:n, 0] - y[:n, 1]) if y.ndim == 2 else 0.0
     sx = _energy(x[:n, 0] - x[:n, 1]) if x.ndim == 2 else 0.0
@@ -919,7 +955,7 @@ def evaluate(cfg: dict, item: Path, tag: str, mdir: Path,
     n = min(len(voc), len(mus), len(mix))
     voc, mus, mix = voc[:n], mus[:n], mix[:n]
 
-    wet, perf = run_chain(cfg, mix, mdir)
+    wet, wet_st, perf = run_chain(cfg, mix, mdir)
     if not len(wet):
         return {"error": "chain produced no output"}
     lag = estimate_lag(wet, mono(mix))
@@ -939,21 +975,31 @@ def evaluate(cfg: dict, item: Path, tag: str, mdir: Path,
     res["delta_si_sdr_db"] = round(res["si_sdr_db"] - si_sdr(x_ref, v_ref), 2)
     res["musical_noise"] = musical_noise(y, x_ref)
     res["clicks"] = click_count(y)
-    res["stereo_width_db"] = stereo_width_db(
-        apply_mix_stereo(mix[off:off + m], wet_a, cfg["mix_pct"]),
-        mix[off:off + m])
+    if wet_st is not None:
+        # The rebuild adds its own framing delay on top of the model's, so
+        # the mono alignment above does not carry over — re-estimate rather
+        # than assume, or the width metric compares shifted signals and
+        # reports image damage that is really just a few ms of offset.
+        st_a, dry_st_a, _ = align(wet_st, mix, estimate_lag(mono(wet_st), mono(mix)))
+        res["stereo_width_db"] = stereo_width_db(
+            apply_mix_stereo(dry_st_a, None, cfg["mix_pct"], wet_st=st_a),
+            dry_st_a)
+    else:
+        res["stereo_width_db"] = stereo_width_db(
+            apply_mix_stereo(mix[off:off + m], wet_a, cfg["mix_pct"]),
+            mix[off:off + m])
 
     # Isolated probes. The chain is nonlinear so these differ from in-mixture
     # behaviour, but they are unambiguous and they are what tells you WHICH
     # WAY to move a parameter: vocal_ret_db falling as midside_exp rises is a
     # direct readout of the trade being made.
-    wv, _ = run_chain(cfg, voc, mdir)
+    wv, _, _ = run_chain(cfg, voc, mdir)
     if len(wv):
         lv = estimate_lag(wv, mono(voc))
         a, b, _ = align(wv, mono(voc), lv)
         res["vocal_ret_db"] = round(_db(_energy(a), _energy(b)), 2)
         res.update(band_damage(a, b))
-    wm, _ = run_chain(cfg, mus, mdir)
+    wm, _, _ = run_chain(cfg, mus, mdir)
     if len(wm):
         lm = estimate_lag(wm, mono(mus))
         a, b, _ = align(wm, mono(mus), lm)
@@ -1015,7 +1061,8 @@ BOOLS = {"on": True, "off": False, "true": True, "false": False,
          "1": True, "0": False, "yes": True, "no": False}
 
 DEFAULT_CFG = {"model": "dpdfnet_hr", "midside": False, "midside_exp": 4.0,
-               "bandlimit": True, "mix_pct": 100.0, "atten_db": 0.0}
+               "bandlimit": True, "stereo": False, "mix_pct": 100.0,
+               "atten_db": 0.0}
 
 
 def parse_sweep(specs: list[str]) -> list[dict]:
@@ -1051,6 +1098,8 @@ def config_id(cfg: dict) -> str:
         parts.append(f"ms{cfg['midside_exp']:g}")
     if not cfg["bandlimit"]:
         parts.append("nobl")
+    if cfg["stereo"]:
+        parts.append("st")
     if cfg["mix_pct"] != 100.0:
         parts.append(f"mix{cfg['mix_pct']:g}")
     if cfg["atten_db"]:

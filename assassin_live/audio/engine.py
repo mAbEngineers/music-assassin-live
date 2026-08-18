@@ -16,6 +16,14 @@ signal instead of glitching, and the wet/dry mix is always ramped (20 ms) so
 toggling never clicks. Dry is delayed through its own FIFO in lockstep with
 the wet one (see _dry_out) so both always refer to the same original
 instant — mixing live dry against lagged wet sounded like an echo.
+
+The wet path is mono end to end (the enhancers are mono speech models), so
+the processed signal used to be written to both output channels — measured
+in B1 as a total stereo collapse on 104/104 corpus pairs. StereoRebuild
+(audio/stereo.py) reconstructs the image from the dry pair instead; the
+worker keeps its own dry FIFO for it, drained in the same lockstep as the
+callback's, so the pair it re-images is the instant the model actually
+processed rather than whatever is live.
 """
 
 import collections
@@ -30,6 +38,7 @@ from ..processors.base import StreamProcessor
 from .backends.base import RoutingBackend
 from .bandlimit import BandlimitFilter
 from .midside import MidSideFilter
+from .stereo import StereoRebuild
 
 SAMPLE_RATE = 48000
 BLOCK = 960          # 20 ms
@@ -37,6 +46,8 @@ XFADE_BLOCKS = 1     # gain ramp spread over one block == 20 ms
 
 LIMITER_THRESHOLD = 0.8  # below this, output passes through untouched
 LIMITER_CEILING = 0.98   # peaks above threshold compress toward this, never past it
+
+_EMPTY_STEREO = np.zeros((0, 2), dtype=np.float32)
 
 
 def _soft_limit(x: np.ndarray) -> np.ndarray:
@@ -75,7 +86,7 @@ class AudioEngine:
         self._backend = backend
         self.stats = EngineStats()
         self._in_q: queue.Queue = queue.Queue(maxsize=8)
-        self._out = np.zeros(0, dtype=np.float32)  # processed mono FIFO
+        self._out = np.zeros((0, 2), dtype=np.float32)  # processed stereo FIFO
         # dry audio delayed through the same FIFO pattern as _out (fed and
         # drained in lockstep, callback-thread-only so no lock needed) —
         # mixing live indata against wet (which lags by the model's
@@ -95,7 +106,18 @@ class AudioEngine:
         self._levels: collections.deque = collections.deque(maxlen=64)
         self._midside = MidSideFilter()
         self._midside_enabled = False
+        self._stereo = StereoRebuild()
+        self._stereo_enabled = False  # B3 fix; off until measured — see set_stereo()
+        # dry stereo held for the rebuild, worker-thread-only. Same lockstep
+        # trick as _dry_out: fed every block, drained by exactly what the
+        # processor produced, so its head always lines up with the model's
+        # output however large the model's internal lag is.
+        self._dry_work = np.zeros((0, 2), dtype=np.float32)
         self._bandlimit = BandlimitFilter(SAMPLE_RATE)
+        # second instance for the right channel: it is a stateful IIR, so a
+        # stereo processor's two channels cannot share one. Unused until a
+        # wants_stereo processor exists.
+        self._bandlimit_r = BandlimitFilter(SAMPLE_RATE)
         self._bandlimit_enabled = True  # safety hygiene filter — on by default
         self._atten_limit_db = 0.0  # forwarded to the processor if it supports one
 
@@ -113,10 +135,11 @@ class AudioEngine:
         processor.reset()
         if processor.sample_rate != SAMPLE_RATE:
             import soxr
+            ch = 2 if processor.wants_stereo else 1
             down = soxr.ResampleStream(
-                SAMPLE_RATE, processor.sample_rate, 1, dtype="float32")
+                SAMPLE_RATE, processor.sample_rate, ch, dtype="float32")
             up = soxr.ResampleStream(
-                processor.sample_rate, SAMPLE_RATE, 1, dtype="float32")
+                processor.sample_rate, SAMPLE_RATE, ch, dtype="float32")
         else:
             down = up = None
         return processor, down, up
@@ -169,6 +192,18 @@ class AudioEngine:
         with whichever pipeline model is selected."""
         self._midside_enabled = enabled
 
+    def set_stereo(self, enabled: bool) -> None:
+        """Toggle stereo reconstruction of the wet path (audio/stereo.py).
+
+        Off by default: it changes what every shipped pipeline sends to the
+        speakers, and this project does not flip shipped defaults on an
+        untested expectation (see ROADMAP §2.2 for what that cost last time).
+        Sweep it first — `bench_quality.py --sweep stereo=off,on` reports the
+        suppression it trades for the image — then flip the default on the
+        numbers. A no-op for processors that produce stereo themselves.
+        """
+        self._stereo_enabled = enabled
+
     def set_bandlimit(self, enabled: bool) -> None:
         """Toggle the ~20 Hz-20 kHz band-limit (see audio/bandlimit.py) on
         the processed output — removes content outside human hearing.
@@ -205,6 +240,9 @@ class AudioEngine:
         self.proc.reset()
         self._midside.reset()
         self._bandlimit.reset()
+        self._bandlimit_r.reset()
+        self._stereo.reset()
+        self._dry_work = np.zeros((0, 2), dtype=np.float32)
         self._levels.clear()
         self._running = True
         self._worker = threading.Thread(target=self._work, daemon=True)
@@ -238,8 +276,9 @@ class AudioEngine:
         with self._in_q.mutex:
             self._in_q.queue.clear()
         with self._lock:
-            self._out = np.zeros(0, dtype=np.float32)
+            self._out = np.zeros((0, 2), dtype=np.float32)
         self._dry_out = np.zeros((0, 2), dtype=np.float32)
+        self._dry_work = np.zeros((0, 2), dtype=np.float32)
         self._wet_gain = 0.0
 
     def retarget(self, monitor_source: str, sink_name: str) -> None:
@@ -276,7 +315,7 @@ class AudioEngine:
 
         with self._lock:
             take = min(frames, len(self._out))
-            wet_mono = self._out[:take]
+            wet_st = self._out[:take]
             self._out = self._out[take:]
 
         # dry pulled from the same lockstep FIFO as wet (both fed once per
@@ -292,8 +331,7 @@ class AudioEngine:
         self._dry_out = self._dry_out[take_dry:]
 
         wet = np.empty_like(dry)
-        wet[:take, 0] = wet_mono
-        wet[:take, 1] = wet_mono
+        wet[:take] = wet_st
         if take < frames:
             wet[take:] = dry[take:]  # underrun tail: fall back to dry
             if self._wet_gain > 0.01:
@@ -322,16 +360,9 @@ class AudioEngine:
                 continue
             proc, down, up = self._runtime
             t0 = time.perf_counter()
-            mono = (self._midside.process(block) if self._midside_enabled
-                   else block.mean(axis=1))
-            if len(mono) == 0:
-                continue
-            x = down.resample_chunk(mono) if down is not None else mono
-            y = proc.feed(x)
-            if up is not None and len(y):
-                y = up.resample_chunk(y)
-            if len(y) and self._bandlimit_enabled:
-                y = self._bandlimit.process(y)
+            y = (self._wet_stereo_proc(proc, down, up, block)
+                 if proc.wants_stereo
+                 else self._wet_mono_proc(proc, down, up, block))
             ms = (time.perf_counter() - t0) * 1000.0
             self.stats.worker_ms_avg = 0.9 * self.stats.worker_ms_avg + 0.1 * ms
             if len(y) == 0:
@@ -340,3 +371,55 @@ class AudioEngine:
                 self._out = np.concatenate([self._out, y.astype(np.float32)])
                 if len(self._out) > self._max_out:
                     self._out = self._out[-self._max_out:]
+
+    def _wet_mono_proc(self, proc, down, up, block) -> np.ndarray:
+        """The shipped path: stereo in, mono model, stereo back out.
+
+        Returns (n, 2) either way — with the image rebuilt from the dry pair
+        when enabled, or the mono signal duplicated (the pre-B3 behaviour)
+        when not, so the callback never has to care which.
+        """
+        # Kept fed unconditionally rather than only while the rebuild is on:
+        # this array is worker-thread-only, and letting the toggle mutate it
+        # from the UI thread would race the concatenate below for no gain.
+        self._dry_work = np.concatenate([self._dry_work, block])
+        if len(self._dry_work) > self._max_out:
+            self._dry_work = self._dry_work[-self._max_out:]
+
+        mono = (self._midside.process(block) if self._midside_enabled
+                else block.mean(axis=1))
+        if len(mono) == 0:
+            return _EMPTY_STEREO
+        x = down.resample_chunk(mono) if down is not None else mono
+        y = proc.feed(x)
+        if up is not None and len(y):
+            y = up.resample_chunk(y)
+        if len(y) and self._bandlimit_enabled:
+            y = self._bandlimit.process(y)
+        if len(y) == 0:
+            return _EMPTY_STEREO
+
+        # The dry pair for exactly the samples the model just emitted: same
+        # lockstep as _dry_out/_out in the callback, so this is the instant
+        # the model saw, not whatever is live now.
+        n = min(len(y), len(self._dry_work))
+        dry_st, self._dry_work = self._dry_work[:n], self._dry_work[n:]
+        if not self._stereo_enabled or n == 0:
+            return np.repeat(y[:, None], 2, axis=1)
+        return self._stereo.process(dry_st, y[:n])
+
+    def _wet_stereo_proc(self, proc, down, up, block) -> np.ndarray:
+        """A processor that consumes the stereo pair itself (ROADMAP A1).
+
+        No downmix, so no image to rebuild — and no mid/side either: that
+        filter's whole job is producing a mono, center-emphasised signal for
+        a mono model, which is precisely what this path does not want.
+        """
+        x = down.resample_chunk(block) if down is not None else block
+        y = proc.feed(x)
+        if up is not None and len(y):
+            y = up.resample_chunk(y)
+        if len(y) and self._bandlimit_enabled:
+            y = np.stack([self._bandlimit.process(y[:, 0]),
+                          self._bandlimit_r.process(y[:, 1])], axis=1)
+        return y
