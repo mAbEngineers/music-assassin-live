@@ -1,11 +1,9 @@
 # Handover — current state
 
-Updated 2026-08-16. **This file is deliberately short.** It covers only where
+Updated 2026-08-17. **This file is deliberately short.** It covers only where
 things stand *right now* and what to do next. The plan, the reasoning, the
 measured findings and the list of dead ends all live in
 [`docs/ROADMAP.md`](docs/ROADMAP.md) — read that before re-deriving anything.
-(An earlier, much longer `HANDOVER.md` was superseded by the roadmap; this
-replaces it.)
 
 ## Where the code is
 
@@ -20,117 +18,153 @@ deliberately not cut yet** — see next actions.
 | `feature/quality-harness` | `tests/bench_quality.py` — the quality measurement harness | merged (`42fe75d`) |
 | `fix/e2e-alignment` | `test_live_e2e.py` cross-correlation alignment + engine health counters | merged (`42fe75d`) |
 | `refactor/routing-backend` | `RoutingBackend` seam; engine decoupled from PipeWire | merged (`92aeb0a`) |
-| `fix/dpdfnet-norm-init` | seeds DPDFNet state from ONNX metadata | merged (`9877b0c`) — **read ROADMAP §2.2** |
+| `fix/dpdfnet-norm-init` | seeds DPDFNet state from ONNX metadata | merged (`9877b0c`) — **read ROADMAP §2.2/§2.3** |
 | `docs/roadmap` | `docs/ROADMAP.md` | merged (`01f6acb`) |
 | `feature/windows-packaging` | installer scaffolding | **not merged** — app can't run on Windows yet (D3) |
 
 The pre-merge state is tagged `pre-merge-backup-20260815` (`06f0ac8`) if any of
 this needs to be unwound.
 
-The first three branches were a **stack, not siblings** — `fix/e2e-alignment`
-already contained the other two, so one merge brought all three in order. (An
-earlier revision of this file and of ROADMAP §1.3 described them as a chain to
-be merged in sequence, and stated the sequence in opposite directions. Both are
-corrected; the underlying dependency is real — `bench_quality.py` imports
-`_soft_limit` from the engine, `test_live_e2e.py` imports `estimate_lag` from
-the harness — it just never required manual ordering.)
+## The two things to read before touching model quality
 
-Two defects had surfaced earlier from test-merging, and are already fixed —
-including one that git merged with **zero textual conflicts** because it was
-semantic, not textual.
+**ROADMAP §2.2/§2.3 — `dpdfnet_hr`'s ONNX norm-init fix.** Its old −30 dB music
+suppression was an artifact of a real defect (discarded ONNX normalization
+metadata → mis-seeded internal normalizer → output depended on input level by
+~36 dB), now fixed. Every previously-recorded suppression figure for this
+model from before 2026-08-14 is invalidated.
 
-## The one thing to read before touching model quality
+**ROADMAP §5 B1 — the model + mid/side comparison, done 2026-08-17.** Run
+against the real 57-clip stereo corpus (§3.1, see below), 104 item-ratio pairs.
+Headline results:
 
-**ROADMAP §2.2.** In short: `dpdfnet_hr`'s headline −30 dB music suppression
-was an artifact of a real defect (its ONNX normalization metadata was being
-discarded, so the model's internal normalizer started mis-seeded and its
-behaviour depended on input level by ~36 dB). With that fixed, it separates
-vocals from music by **0.83 dB — identical to `gtcrn`**.
+| model | net dSI-SDR | vocal damage | notes |
+|---|---|---|---|
+| `dpdfnet_hr` | **+4.19 dB (best)** | −5.0 dB (worst) | stays the pragmatic default — best net, at the cost of the most vocal damage |
+| `dtln` | +3.59 dB | **−0.9 dB (best)** | ~4× faster; the strongest by-ear candidate against the default |
+| `gtcrn` | +2.64 dB | −2.3 dB | its "improved" musical-noise score is likely a hollowed-spectrum artifact, not real |
+| `dpdfnet` (16 kHz) | **−0.28 dB (net harmful)** | −3.1 dB | worse than doing nothing on this corpus; don't recommend it |
 
-This disproves the belief, held since 2026-07-24, that `dpdfnet_hr` was doing
-real music-vs-voice separation. It is not. No shipped model removes music; all
-four are ~1 dB separators. Keep it as default for the *correct* reason — it is
-48 kHz-native and preserves high frequencies (−4 dB in the 8–20 kHz band vs
-`gtcrn`'s −49 dB) — not because it removes music better.
+**Mid/side at the shipped exponent (4), stacked with `dpdfnet_hr`, should
+*not* be flipped on** — it deepens suppression 4.4 dB but net SI-SDR drops
+(4.19 → 3.23) and vocal-loss frames nearly double (36/104 → 60/104). The
+opposite of the hoped-for outcome. Keep it off; a lower exponent is the more
+promising next experiment (ROADMAP B2), not exposed as a default yet.
 
-Every previously-recorded suppression figure for this model is invalidated.
+**Also newly measured, universal: stereo width collapses to −161 dB on every
+single one of 104 pairs, every model, mid/side on or off.** Not occasional —
+every time the filter runs, the output goes fully mono. Promoted to Phase 2 in
+the roadmap (was Phase 3, gated on the separator work; it no longer needs
+that).
+
+**Sharper finding, category breakdown (`male_lead`, 8 clips — added
+specifically to test the 2026-07-24 "cuts girl vocals" complaint from the
+other direction).** `dpdfnet_hr`'s net advantage nearly disappears on male
+leads specifically: dSI-SDR +4.19 dB whole-corpus → **+0.33 dB** on this
+category, with its worst vocal damage anywhere (−8.5 dB). `dtln` and `gtcrn`
+both net-beat it here. On `sparse_acoustic` the opposite holds — `dpdfnet_hr`
+pulls far ahead (+9.39 dB, 8× the others). Its advantage is concentrated in
+sparse/quiet content, not uniform. Not a resolution of the original
+female-vocal complaint (adjacent question, different vocals) but the single
+most actionable lead from this session.
+
+**One unresolved anomaly, flagged rather than papered over:** on
+`dual_mono_control` (n=4, expected-null — no real side channel), turning
+mid/side on makes vocal retention *worse* (−15.3 → −20.8 dB) while aggregate
+dSI-SDR simultaneously *improves* (−2.58 → +0.85 dB). Something in the metric
+or mix path behaves oddly at very low side-channel energy. Not root-caused —
+don't build on this category's numbers yet.
+
+**By-ear audio exists — for `male_lead` and `sparse_acoustic` — but nobody has
+listened yet.** `~/.local/state/music-assassin/bench/b1/audio_{male,sparse}/`,
+covering input/oracle/ceiling/`dpdfnet_hr`/`gtcrn`/`dtln` at two ratios each.
+Not yet rendered for the full corpus or for `dtln` vs `dpdfnet_hr` head-to-head
+outside those two categories. Priority listen: `male_lead` — that's where the
+numbers disagree most with the standing default.
 
 ## Immediate next actions
 
-1. **Corpus build in progress, unattended.** The user supplied 57 real files
-   at `~/Music/MusicAssassin/Corpus/` on 2026-08-16 (fixing the 2026-08-15
-   dead end below). A detached htdemucs build is running as of this write-up,
-   ~2 h budget on this machine — check `~/.local/state/music-assassin/bench/corpus/manifest.json`
-   for progress (57 items when done). See ROADMAP §3.1 for composition and
-   the window-selection bug that was caught and fixed before it could bias the
-   ground truth.
-2. **The by-ear model comparison (B1)** — gates the 0.1.4 tag. The current
-   default was chosen by ear against a misbehaving model, and all four
-   enhancers are within ~0.4 dB of each other. The *model* half can run against
-   the existing fixtures right now; the mid/side half needs item 1 to finish.
-3. **Cut the 0.1.4 tag and push** — once item 2 has confirmed what the release
-   notes should say about the default model. The `.deb` itself is already
-   rebuilt from merged `main` (2026-08-15, 0.1.4, binary smoke-tested,
-   `speechdenoiser` correctly excluded for its unresolved license).
-4. Then Phase 2 in the roadmap: C1 gapless device switching (the originally
-   reported pain point), C2 volume forwarding. Neither needs the corpus.
+1. **Listen to the rendered audio.** `~/.local/state/music-assassin/bench/b1/audio_male/`
+   first (the male-vocal finding above), then `audio_sparse/`. This is the one
+   thing still gating the 0.1.4 tag — release notes shouldn't quote numbers
+   nobody has heard, especially the surprising ones above. If it confirms the
+   quantitative lead, extend `--dump-audio` to the rest of the corpus and to a
+   direct `dpdfnet_hr` vs `dtln` A/B before deciding anything about the
+   default.
+2. **Cut the 0.1.4 tag and push** once item 1 confirms (or revises) what the
+   release notes should say. The `.deb` is already rebuilt from merged `main`
+   (2026-08-15, binary smoke-tested, `speechdenoiser` correctly excluded for
+   its unresolved license).
+3. Then Phase 2 in the roadmap: **C1** gapless device switching (the
+   originally reported pain point), **C2** volume forwarding, **B3** stop
+   collapsing to mono (promoted this session — see above), **A6** report
+   input RMS in `bench_offline()` so a repeat of the §2.1 investigation is
+   visible at a glance instead of taking hours.
 
 Worth reordering ahead of Phase 3 when you get there: the **stereo processor
 contract** (`wants_stereo`, engine stops downmixing) is currently buried inside
 A1, but three separate blocked items sit behind it — A1 (Spleeter crashes on
-mono input), B3 (the mono-output regression), and Q5 (whether mono is
-acceptable stops being a question once stereo is possible). It needs no input
-from anyone. Likewise Q3 does not really block the A1 spike: A1's own text says
-the spike should *produce* a latency-vs-quality curve, which is what answers
-Q3 — the ceiling only gates the final chunk-size pick.
+mono input), B3 (the mono-output regression, now measured universal), and Q5
+(mono-acceptability stops being a question once stereo is possible). It needs
+no input from anyone.
 
 ## Open questions for the user
 
 Listed in full as ROADMAP §10. The ones that block work right now:
 
 - **Latency ceiling** — hard product constraint for the separator work (A1);
-  ~50–70 ms and ~500 ms lead to different designs. (Gates A1's *conclusion*,
-  not its start — see above.)
-- **Mono output while filtering** — currently total (−122 dB side-channel at
-  100 % wet). Acceptable, or is stereo preservation required?
+  ~50–70 ms and ~500 ms lead to different designs. Gates A1's *conclusion*,
+  not its start — the spike's own job is to produce the latency-vs-quality
+  curve that answers this, not to be handed the answer up front.
+- **Mono output while filtering** (Q5) — now measured universal, −161 dB,
+  every model, every config. Acceptable for now, or worth engineering around
+  before A1 changes the output path anyway?
 
-~~Stereo source material for the corpus.~~ **Resolved 2026-08-16.** The
-2026-08-15 attempt from `~/Music/Acapella/` failed outright — that folder name
-is accurate, all 91 files are vocal-only. The user then supplied 57 real files
-at `~/Music/MusicAssassin/Corpus/`: the original 39 anime OP/EDs plus 18 tracks
-added specifically because the first batch turned out to be **100% female
-vocal** (median F0 331 Hz, nothing below 205 Hz) — `male_lead` (8), `rap` (3),
-`sparse_acoustic` (4), `orchestral_dialogue` (3). All 57 passed the acapella
-guard before separation. ROADMAP §3.1 has the full composition, the acapella
-pre-check (now `scripts/corpus_excerpt.py`, committed), and a second bug this
-round caught before it could bias results — the excerpt window-picker was
-landing on the loudest 20 s (usually the chorus) rather than the first vocal
-entrance, which would have understated how low male vocals in this material
-actually go.
+## What got resolved this session (2026-08-16/17)
+
+- **Stereo corpus**: built and used. 57 real clips (`~/Music/MusicAssassin/Corpus/`),
+  8 categories, structurally verified before separation. A 2026-08-15 attempt
+  from `~/Music/Acapella/` failed outright — that folder is 100% vocal-only,
+  don't retry it. A second methodology bug (the excerpt window-picker biasing
+  toward the loudest/chorus moment, understating how low male vocals in this
+  material actually go) was caught and fixed before it could bias results —
+  see ROADMAP §3.1 for the full story, including why `male_lead`/`rap`/
+  `sparse_acoustic`/`orchestral_dialogue` were added (the original 39 files
+  were 100% female vocal, median F0 331 Hz).
+- **B1**: run to completion, real findings above.
 
 ## Environment notes
 
 - Python: `.venv/bin/python` in the repo root. Models live in
   `~/.local/share/music-assassin/models/`.
+- Corpus and sweep outputs live under `~/.local/state/music-assassin/bench/`
+  (`corpus/` for the built stems, `b1/` for this session's sweep CSVs/logs,
+  `quality/latest.json` for the harness's own diff-vs-previous state).
+- `scripts/run_b1_sweep.sh` is what actually produced §5 B1's numbers — one
+  `bench_quality.py` invocation per model rather than one combined `--sweep`,
+  because the harness only prints its comparison table once the whole
+  invocation finishes, and a combined run took ~7 h with nothing on disk until
+  it did. Detached the same way as corpus builds; reruns skip whatever already
+  has a CSV. `speechdenoiser` is deliberately excluded from it — its license
+  is unresolved, so it can't be the shipped default no matter how it scores.
 - Building the harness's reference corpus needs `demucs` (torch), which this
   app deliberately never depends on — run it out-of-process via
   `--demucs-python ~/Documents/venvs/assassin_venv_v0.4.4_cpu/bin/python`.
 - **Detach long runs from the editor.** VS Code crashing has already killed one
-  corpus build mid-run (and once triggered an OOM kill — see below). Start them
-  with `setsid nohup … &` and verify with `ps -o pid,sid` that SID == PID.
+  corpus build mid-run (and once triggered an OOM kill). Start them with
+  `setsid nohup … &` and verify with `ps -o pid,sid` that SID == PID.
   `build_refs` checkpoints its manifest after every source and skips completed
   clips, so rerunning the same command resumes; `--rebuild` forces a redo.
 - **Excerpt before separating, and use `htdemucs` not `mdx_extra`.**
   `scripts/corpus_excerpt.py` cuts a 30 s excerpt per source before demucs ever
-  sees it (`--duration` on `build_refs` truncates *after* separation, so
-  without this demucs chews whole tracks — that's what OOM-killed the machine
-  on 2026-08-15). It also refuses acapella-looking sources outright and biases
-  its window pick toward the first vocal entrance rather than the loudest
-  moment (see ROADMAP §3.1 for why that distinction mattered). `mdx_extra`
-  peaks at 3.6 GB / 132 s even on a 30 s excerpt; `htdemucs` is 1.2 GB / 39 s
-  for a modest quality loss — use it on this machine.
+  sees it. It also refuses acapella-looking sources outright and biases its
+  window pick toward the first vocal entrance rather than the loudest moment.
+  `mdx_extra` peaks at 3.6 GB / 132 s even on a 30 s excerpt; `htdemucs` is
+  1.2 GB / 39 s for a modest quality loss — use it on this machine, and it's
+  the corpus's separator of record.
 - `tests/test_live_e2e.py`'s hardware tier and anything calling
   `RoutingSession.enable()` **take over the system default audio sink**.
   `python -m assassin_live --recover` restores it if something dies mid-run.
-- `.claude/worktrees/` is scratch space for parallel agent worktrees; it is not
-  project content and should be gitignored if it starts appearing in status.
+  Nothing in this session's work touched system audio.
+- `.claude/worktrees/` is scratch space for parallel agent worktrees; still
+  not gitignored (noted in the previous handover, still true) — worth adding
+  if it keeps appearing in `git status`.

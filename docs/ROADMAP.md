@@ -195,6 +195,12 @@ suppression, which would partially resolve the open research problem." It was
 not. §2's finding therefore stands *unqualified*: no shipped model removes
 music, all four are ~1 dB separators, and A1 is the only path.
 
+(This table is a single-clip, isolated-signal probe — vocals fed alone, then
+music fed alone. §5 B1's 104-pair, in-mixture, whole-corpus sweep is a
+different and more complete measurement and ranks the same four models
+differently by net dSI-SDR — not a contradiction, a different question. Read
+both; B1 is the one that should drive the default-model decision.)
+
 **Practical impact on the *music* path is smaller than the table implies.** The
 dramatic change is at low input levels; at realistic listening levels
 (RMS 0.05–0.1) the model was already only giving −1.3 to −4.6 dB.
@@ -293,7 +299,7 @@ never depends on — point `--demucs-python` at
 `~/Documents/venvs/assassin_venv_v0.4.4_cpu` (or any venv from the research
 repo's `setup_v044.sh`) rather than adding torch to this repo's own venv.
 
-### 3.1 The stereo corpus — material supplied, build in progress 2026-08-16
+### 3.1 The stereo corpus — built and used, 2026-08-16/17 ✅
 
 Every measurement before this date used **one 15-second mono clip**, which
 made every mid/side and stereo-width number meaningless by construction. Three
@@ -350,13 +356,12 @@ vocals" apart from "this model is bad at vocals" — different fixes follow from
 each. `male_lead` closes that gap (verified median F0 down to 201–204 Hz after
 the window-picker fix, vs. the original corpus's floor of 205 Hz).
 
-**Build status.** Launched 2026-08-16, detached (`setsid`, verified
-session-leader, survives an editor crash), `tests/bench_quality.py
---build-refs --demucs-model htdemucs`, ~171 htdemucs passes at ~39 s each,
-budget ~2 h on this 4-core i3. Checkpointed per source (the fix from the
-previous attempt — see the commit history on `bench_quality.py`), so an
-interruption resumes rather than restarts. Not yet used for B1; do that once
-the manifest shows all 57 items.
+**Build status: complete.** Finished 2026-08-16 — manifest shows all 57
+items, ~3.6 GB. Checkpointing (per-source, resumable) was never actually
+needed this run, but stayed in place as the guard against a repeat of the
+2026-08-15 OOM kill. Used for the B1 sweep in §5 below — 104 item-ratio pairs
+(52 tuning clips × 2 ratios; 5 `anime_op_stereo` holdout clips correctly
+excluded from tuning, per their purpose above).
 
 **Remaining gaps, lower priority than what's already covered:** no Western
 pop/rock/EDM, no solo-piano-only or fully a cappella-in-the-mix passages, and
@@ -473,37 +478,137 @@ straight out of it.
 
 ## 5. Workstream B — De-musicing quality: pre/post filters
 
-### B1. Quantitative + by-ear A/B: mid/side prefilter on vs. off ⭐ do first
+### B1. Quantitative model + mid/side comparison — swept 2026-08-17 ✅, by-ear check still open
 
-Measured in research: `g⁴` gives a 16.8× voice/music ratio vs 9.2× for plain
-mono downmix, at −0.01 dB vocal loss. It is shipped, working, off by default,
-and **has never been evaluated against real content**. It is the most likely
-partial answer to the recurring "vocals get cut" complaint, and — now that
-`tests/bench_quality.py` exists (§3 above) — it costs one sweep to check:
-`--sweep midside=off,on --sweep midside_exp=1,2,4,6`, then confirm the winner
-by ear with `--dump-audio`. If it holds up, flip the default to ON.
+Run against the full corpus (§3.1): `--sweep model=gtcrn,dpdfnet,dpdfnet_hr,dtln`
+and `--sweep midside=off,on` (at the shipped default `midside_exp=4`), 104
+item-ratio pairs each. Results in `~/.local/state/music-assassin/bench/b1/`.
 
-Caveat the research itself flags, and the harness's own `musical_noise` /
-`gap_roughness_db` columns exist to catch: aggressive exponents can introduce
-"musical noise" artifacts that a plain suppression-energy number won't show.
-The by-ear pass over `--dump-audio` output is still the real test — the
-numbers rank candidates, they don't settle quality (see the harness's own
-docstring on this).
+**Model comparison** (in-mixture, whole-corpus — a different, more complete
+measurement than §2.2's single-clip isolated separation ratio; see the
+reconciliation note at the end of §2.2):
 
-### B2. Expose the mid/side exponent as a control
+| model | music_supp | vocal_ret | Δ**SI-SDR** | SAR | latency | RTF |
+|---|---|---|---|---|---|---|
+| `dpdfnet_hr` | −46.1 dB | −5.0 dB | **+4.19 dB** | **4.40** | 50 ms | 0.32 |
+| `dtln` | −20.6 dB | **−0.9 dB** | +3.59 dB | 4.24 | **24 ms** | **0.07** |
+| `gtcrn` | −28.1 dB | −2.3 dB | +2.64 dB | 3.59 | 16 ms | 0.09 |
+| `dpdfnet` (16 kHz baseline) | −52.9 dB | −3.1 dB | **−0.28 dB** | 0.27 | 50 ms | 0.15 |
 
-`MidSideFilter(exponent=4.0)` is hardcoded. Given B1's artifact caveat, the
-useful shape is a slider (1–6, default 4) rather than a fixed value — the
-right exponent is content-dependent, and users can hear what a metric can't.
-Small change; only worth doing after B1 says the filter is worth keeping.
+**`dpdfnet_hr` keeps the best net dSI-SDR of anything tested — the pragmatic
+default choice holds up, on a real 57-clip corpus, not just the one clip §2.2
+used.** But it is also the *most* vocally damaging of the four (−5.0 dB, worst
+in the table); its net win comes from music suppression outweighing that in
+the SI-SDR math, which does not necessarily match what a listener notices.
+**`dtln` is the standout on vocal preservation** (−0.9 dB, next-best is
+3× worse) **and is ~4× faster** at a close second place on dSI-SDR — the
+strongest candidate for a real by-ear A/B against the default, especially
+given the standing "vocals still getting cut" complaint. **`dpdfnet` (16 kHz
+baseline) is net *harmful*** on this corpus (negative dSI-SDR — worse than
+doing nothing) despite the deepest raw suppression number; it should not be
+recommended even as an alternative.
 
-### B3. Stop collapsing output to mono ⭐ unlisted quality regression
+Failure taxonomy (auto-tagged per clip, all models, 104/104 pairs unless
+noted): universal across every model — `hf-loss` (8–20 kHz destroyed) and
+`stereo-collapse` (see B3). Per-model standouts: `dpdfnet` clicks on 79/104
+clips (worst); `dtln` is boundary-sensitive on 44/104 (worst); `dpdfnet_hr`
+shows `vocal-loss` on 36/104 (worst, before mid/side — see below); `gtcrn`'s
+`musical_noise` score is a **large outlier (−20.0**, vs +1 to +7 for the
+others) that reads as "improved" but is more likely an artifact of its
+104/104 `hf-loss` hollowing the spectrum out rather than genuine cleanliness
+— don't read that number as a win without listening to it.
+
+**Mid/side, `dpdfnet_hr`, exponent 4 — result is negative, do not flip the
+default.** This is the opposite of what the original plan below expected:
+
+| config | music_supp | vocal_ret | Δ**SI-SDR** | vocal-loss tag | stereo width |
+|---|---|---|---|---|---|
+| `dpdfnet_hr` (off) | −46.1 dB | −5.0 dB | **+4.19 dB** | 36/104 | −161 dB (already collapsed, see B3) |
+| `dpdfnet_hr+ms4` (on) | −50.5 dB | −7.4 dB | **+3.23 dB** | **60/104** | −161 dB |
+
+Turning mid/side on deepens music suppression by 4.4 dB, but *net SI-SDR gets
+worse* (4.19 → 3.23) and the fraction of clips showing real vocal-loss nearly
+doubles (36 → 60 of 104). At exponent 4, stacked with `dpdfnet_hr`, on this
+diverse real corpus, mid/side is a net loss, not the hoped-for partial answer
+to "vocals get cut" — if anything it's the opposite here, since it's cutting
+*more* vocals to buy suppression the SI-SDR math doesn't value as highly.
+**Keep mid/side off by default.** This doesn't rule out mid/side entirely —
+only exponent 4 stacked with `dpdfnet_hr` was tested; see B2, now the more
+promising direction than a flip.
+
+**Category breakdown — `male_lead` (8 clips), the set added specifically to
+test whether the "cuts some girl vocals" complaint (2026-07-24) is a
+female-vocal-specific problem or a general one. It surfaces a sharper,
+different finding than that question was aimed at:**
+
+| category | model | music_supp | vocal_ret | Δ**SI-SDR** |
+|---|---|---|---|---|
+| `male_lead` | `dpdfnet_hr` | −48.4 dB | **−8.5 dB** | **+0.33 dB** |
+| `male_lead` | `dtln` | −20.0 dB | −1.6 dB | +1.07 dB |
+| `male_lead` | `gtcrn` | −28.8 dB | −2.9 dB | +0.72 dB |
+| `sparse_acoustic` | `dpdfnet_hr` | −48.0 dB | −0.9 dB | **+9.39 dB** |
+| `sparse_acoustic` | `dtln` | −21.6 dB | −0.3 dB | +1.11 dB |
+| `sparse_acoustic` | `gtcrn` | −30.5 dB | −1.5 dB | +0.96 dB |
+
+**On male vocals specifically, `dpdfnet_hr`'s net advantage nearly vanishes**
+— dSI-SDR drops from the whole-corpus +4.19 dB down to +0.33 dB, and vocal
+damage (−8.5 dB) is nearly double its whole-corpus average and the worst of
+any model/category combination measured this session. `dtln` and `gtcrn` both
+net-beat it here. **On sparse/quiet material it's the opposite** — `dpdfnet_hr`
+pulls far ahead (+9.39 dB, more than 8× the other two) with its *best* vocal
+retention anywhere measured. Its whole-corpus advantage is not uniform; it is
+concentrated in sparse/quiet content and largely absent on male leads. This is
+not a resolution of the original female-vocal complaint (this category is a
+different, adjacent question) but it is a concrete, actionable lead in its
+own right and should weigh heavily in the by-ear pass below.
+
+**An anomaly in the `dual_mono_control` category (n=4 pairs, expected-negative
+— these clips have no real side channel, S/M ≤ −44 dB), flagged rather than
+explained away:** turning mid/side ON makes vocal retention measurably *worse*
+(−15.3 → −20.8 dB) on content with nothing for it to exploit, yet the
+aggregate dSI-SDR simultaneously *improves* (−2.58 → +0.85 dB). Both numbers
+moving in seemingly incompatible directions on a tiny, expected-null sample is
+a sign something in the metric or the mix path behaves unusually at very low
+side-channel energy — not yet root-caused. Don't build on this category's
+numbers without investigating further.
+
+**By-ear audio has been rendered, but not yet listened to.** `--dump-audio`
+output exists for `male_lead` and `sparse_acoustic` at both ratios, covering
+input / oracle / ceiling / `dpdfnet_hr` / `gtcrn` / `dtln`
+(`~/.local/state/music-assassin/bench/b1/audio_{male,sparse}/`, see
+`scripts/run_b1_sweep.sh`). The harness's own docstring is explicit that the
+numbers rank candidates, they don't settle quality — nobody has listened yet,
+and three findings above (mid/side hurting, `dpdfnet` scoring net-negative,
+`dpdfnet_hr` cratering on male leads) are surprising enough that none should
+be treated as final until someone does. **Priority listen: the `male_lead`
+files — that's where the numbers disagree most with the standing default
+choice.**
+
+### B2. Tune (not just expose) the mid/side exponent
+
+`MidSideFilter(exponent=4.0)` is hardcoded. B1 shows exponent 4 net-hurts
+`dpdfnet_hr` on real content (doubles the vocal-loss rate for a suppression
+gain SI-SDR doesn't reward) — so the natural next step is sweeping *lower*
+exponents (`--sweep midside_exp=1,1.5,2,2.5,3`) against the same corpus before
+touching the UI, not exposing 4 as a user-facing default that already measures
+worse than off. If a lower exponent finds a real win, a slider (rather than a
+fixed value) is still the right shape, since content-dependence is real —
+but tune the shipped default first.
+
+### B3. Stop collapsing output to mono ⭐ now measured, not just theoretical
 
 `AudioEngine._callback_body()` writes the mono wet signal to both output
 channels (`wet[:,0] = wet[:,1] = wet_mono`). **At 100 % mix the entire system
 output is mono.** For a system-wide filter that users leave on while watching
 video, losing the stereo image is a large, constant perceptual cost that no
-handover has recorded.
+handover had recorded until B1's sweep quantified it directly.
+
+**Measured 2026-08-17, B1 sweep: `stereo_width_db = −161 dB`, on every one of
+104 item-ratio pairs, for all four models, with mid/side on or off.** Not an
+occasional or content-dependent regression — total, universal collapse, every
+single time the filter is active. This is now the single most consistently
+measured defect in the whole corpus (the only failure tag that fires 100 % of
+the time across every configuration tested).
 
 Options, cheapest first:
 - Apply the model's per-band gain to the original stereo pair instead of
@@ -779,50 +884,55 @@ entry ticket to a Windows APO later. Not near-term.
    green on the merged tree. **The 0.1.4 tag is still held** until item 7, so
    release notes don't describe the default model using numbers §2.2
    invalidated.
-**Remaining in this phase:**
-
-7. **Build a varied stereo corpus** for `bench_quality.py` — **unblocked
-   2026-08-16, build in progress.** A 2026-08-15 attempt from
-   `~/Music/Acapella/` failed outright (every file there is vocal-only — §3.1
-   dead-ends note). The user then supplied 57 real files, structurally
-   verified, with a second methodology bug (chorus-biased excerpt windowing)
-   caught and fixed before it could bias the ground truth. Detached htdemucs
-   build running as of this write-up, ~2 h budget; see §3.1 for composition
-   and status.
-8. **Redo the by-ear model comparison (B1).** The last thing gating the 0.1.4
-   tag: the existing default was chosen by ear against a model that was
-   misbehaving, and §2.2 shows all four enhancers are within ~0.4 dB of each
-   other on vocal/music separation. The model half can run on the existing
-   fixtures; the mid/side half needs item 7's corpus to finish building.
+7. ~~**Build a varied stereo corpus** for `bench_quality.py`.~~ Done
+   2026-08-16 — 57 clips, structurally verified, a second methodology bug
+   (chorus-biased excerpt windowing) caught and fixed before it could bias
+   the ground truth. See §3.1.
+8. ~~**Redo the model + mid/side comparison (B1) quantitatively.**~~ Done
+   2026-08-17 against the full corpus — see §5 B1. Result: `dpdfnet_hr` stays
+   the best net choice; mid/side at the shipped exponent should **not** be
+   flipped on (it net-hurts); `dtln` is a real contender worth a direct
+   by-ear A/B against the default.
 9. ~~**Rebuild the `.deb`** from merged `main` (E4).~~ Done 2026-08-15 —
    0.1.4, binary smoke-tested, four redistributable models bundled
-   (`speechdenoiser` correctly excluded, license still unresolved). Ships as
-   soon as item 8 clears the tag.
+   (`speechdenoiser` correctly excluded, license still unresolved).
+
+**Remaining in this phase — the one thing still gating the 0.1.4 tag:**
+
+10. **By-ear confirmation of B1's numbers.** `--dump-audio` the corpus for
+    `dpdfnet_hr` vs `dtln` (with and without mid/side) and actually listen,
+    per the harness's own docstring — B1's numbers rank candidates, they
+    don't settle quality, and two of its findings (mid/side hurting, `dpdfnet`
+    baseline scoring net-negative) are surprising enough to deserve a listen
+    before either goes into release notes or gets acted on further.
 
 ### Phase 2 — Make it feel like a product (1–2 weeks)
 
-9. **C1 — gapless output switching.** The named pain point. Start with the
-   live-`pw-metadata`-retarget spike.
-10. **C2 — volume-key forwarding.** Promoted: it is now a suspected
+11. **C1 — gapless output switching.** The named pain point. Start with the
+    live-`pw-metadata`-retarget spike.
+12. **C2 — volume-key forwarding.** Promoted: it is now a suspected
     measurement confound, not only a UX wart (see C2).
-11. **A6 — report input RMS in `bench_offline()`.** Small, and it prevents a
+13. **A6 — report input RMS in `bench_offline()`.** Small, and it prevents a
     repeat of the §2.1 investigation.
-12. **C3 — coherent system-picker behavior**, **C4 — human status line.**
-13. **E1 — CI** (scoped smaller than it looks; see E1).
+14. **B3 — stop collapsing output to mono.** Also promoted: now a measured
+    universal (−161 dB, 104/104 pairs, every model — see B3), not a
+    theoretical gap. Worth pulling forward from Phase 3, since it no longer
+    needs A1 to be worth fixing — it affects every pipeline shipped today.
+15. **C3 — coherent system-picker behavior**, **C4 — human status line.**
+16. **E1 — CI** (scoped smaller than it looks; see E1).
 
 ### Phase 3 — Make it actually remove music (weeks)
 
-10. **A1 — separator spike** on `feat/separator-spike`: stereo processor
+17. **A1 — separator spike** on `feat/separator-spike`: stereo processor
     contract, chunked Spleeter wrapper, latency-vs-quality curve.
-11. **A3 — data-driven model registry** (also unblocks C6, E5).
-12. **B3 — stereo output**, designed alongside whatever A1 produces.
-13. **A2 — HS-TasNet training** running in the research repo in parallel
+18. **A3 — data-driven model registry** (also unblocks C6, E5).
+19. **A2 — HS-TasNet training** running in the research repo in parallel
     throughout.
 
 ### Phase 4 — Second platform (parallel, own branch)
 
-14. **D4 — close the VB-Audio licensing question.**
-15. **D3 — Windows routing backend**, then a real Windows build environment,
+20. **D4 — close the VB-Audio licensing question.**
+21. **D3 — Windows routing backend**, then a real Windows build environment,
     then validate the `.iss` script, then merge.
 
 ### Deferred
@@ -853,7 +963,12 @@ manual-install prompt as the permanent shipped Windows experience?
 
 **Q5 (blocks B3 design).** Is mono output while filtering acceptable for now,
 or is stereo preservation a requirement? It interacts with the mid/side
-prefilter, which removes the side channel by design.
+prefilter, which removes the side channel by design. **Sharper as of B1
+(2026-08-17):** this is no longer a theoretical corner case — it's measured at
+−161 dB stereo width on 104/104 pairs, every model, every config tested. The
+question isn't whether the regression is real; it's how much engineering to
+spend restoring width given A1 will eventually change the whole output path
+anyway.
 
 ---
 
