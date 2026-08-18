@@ -64,8 +64,17 @@ run_once male_ears      --only-category male_lead --sweep stereo=off,on \
 echo "######## B3 SWEEP COMPLETE $(date '+%F %H:%M:%S') ########"
 
 # NOTES
-#   launch:   setsid nohup bash scripts/run_b3_sweep.sh \
+#   WHERE: on the box that holds the corpus (~/.local/state/music-assassin/
+#   bench/corpus). It is not on every machine this repo is edited from, and
+#   the sweep reads every clip many times -- over a network mount that alone
+#   would dominate the runtime.
+#
+#   launch:   mkdir -p ~/.local/state/music-assassin/bench/b3
+#             setsid nohup bash scripts/run_b3_sweep.sh \
 #               >> ~/.local/state/music-assassin/bench/b3/run.log 2>&1 < /dev/null &
+#             (the mkdir is not optional -- the shell opens run.log before the
+#             script runs, so it cannot be the script's own mkdir -p that
+#             creates the directory)
 #   progress: grep -E '^== ' ~/.local/state/music-assassin/bench/b3/run.log
 #   resume:   rerun the same command; completed steps skip on their CSV
 #   by ear:   scripts/ab_listen.sh reads the b1 dumps; point it at b3's with
