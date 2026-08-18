@@ -13,7 +13,7 @@ measured findings and the list of dead ends all live in
 |---|---|---|
 | `main` | 0.1.4, green on the offline suite | at `8df4f83` |
 | `feature/stereo-output` | B3 stereo rebuild, `wants_stereo`, C1, C2, C3, C4, C7, C8, E1 | **13 commits, unpushed** |
-| `feat/separator-spike` | A1 spike (measurement only, no processor yet) | 2 commits, off the above |
+| `feat/separator-spike` | A1 spike + the SpleeterProcessor and its sweep | 3 commits, off the above |
 | `feature/windows-packaging` | installer scaffolding | not merged — app can't run on Windows (D3) |
 
 Pushing needs to happen from a machine with credentials — this session had
@@ -138,24 +138,54 @@ binding constraint and RTF is nearly irrelevant. Practical floor ≈ 1 s chunks
 → **≥1.1 s end-to-end**, so this can only ever be an additional high-latency
 mode; the ~50 ms path is unreachable with it. That answers **Q3 by force**.
 
-Also: peak RSS 478 MB; every call emits a startup transient (~26 samples
-reaching |466| against a p99.99 of 0.6) that a chunked wrapper must trim or it
-clicks once per chunk; output is shorter than input (44100 → 44032); stems[0]
-is vocals, [1] accompaniment, confirmed by cross-correlation.
+Also: peak RSS 478 MB; stems[0] is vocals, [1] accompaniment, confirmed by
+cross-correlation.
 
-**No quality curve yet, deliberately.** An ad-hoc probe gave nonsense (both
-stems below the mixture) and the cause was the probe — linear-interp
-resampling and single-lag alignment, exactly what `estimate_lag`'s docstring
-warns about. The curve comes from writing the `StreamProcessor` and sweeping
-it through `bench_quality.py`, which already solves alignment carefully.
+## A1 — the processor exists now, and it corrected three of the spike's notes
 
-Next step for A1: `SpleeterProcessor` (`wants_stereo=True`, chunked, transient
-trimmed, remainder carried), registered as `spleeter_<chunk>ms` variants so
-`--sweep model=...` produces the curve. sherpa-onnx is **not** in the app venv
-and should not be added to `requirements.txt`; use
-`~/Documents/venvs/assassin_venv_v0.4.4_cpu/bin/python`, which has 1.13.4.
-Models: `Music-Assassin/models/sherpa_onnx/sherpa-onnx-spleeter-2stems-int8/`
-(2 × 26 MB) — note the `sherpa_onnx/` path component.
+`assassin_live/processors/spleeter.py` is the first `wants_stereo` processor:
+chunked, overlap-discard, `spleeter_<n>ms` registry variants so the chunk is a
+`--sweep` axis. `tests/test_spleeter_chunking.py` pins the behaviour;
+`scripts/run_a1_sweep.sh` prices it. Building it moved three of the spike's
+notes, all by measurement:
+
+- **There is no remainder to carry.** Output length is the input truncated to
+  a multiple of 1024 — *when fed at 44100*. The spike saw 44100 → 44032 and
+  read it as loss; it is quantisation. Feed any other rate and sherpa
+  resamples internally, the returned length is in the **output** rate, and
+  input offsets stop matching output offsets. Hence `sample_rate = 44100`.
+- **The impulse is at both ends, and it is far bigger than recorded.** Not
+  ~26 samples at |466| at the head: on real corpus audio, **11043** in the
+  first 8 samples against an interior peak of **1.28**, plus a smaller one
+  (863) at the tail. Context is discarded on both sides. Emitted peak is now
+  0.57× the input peak, no sample above 2.0.
+- **Chunking is not an approximation of one-shot, and context does not fix
+  it.** Interior chunks land **8–11 dB** below a whole-buffer run, flat across
+  0.25/0.5 s of context and 1/2/4 s chunks. Not a seam artifact: one fitted
+  gain per chunk explains almost none of it (−7.8 → −8.1 dB) and the residual
+  is spread through the chunk, not piled at its edges. Spleeter masks a
+  spectrogram whose context is the whole buffer, so a chunked run is a
+  different computation. Whether that costs anything *audible* is what the
+  sweep asks.
+
+**The bench measured a chunked processor's latency as zero**, and its >120 ms
+lip-sync failure tag could therefore never fire for the one processor it was
+written for. A chunk-buffering processor emits output whose first sample still
+corresponds to input sample 0 — the delay is in when samples become
+*available*, and concatenating a file offline erases exactly that. `evaluate()`
+now reports `max(measured, declared)`. This is the same blindness B3 has with
+the side channel, in a different column.
+
+**Do not read RTF from the A1 sweep as headroom.** It averages a 20 ms block
+budget over a process that only runs every `chunk_ms`. The spike's table is
+the latency authority.
+
+Environment: sherpa-onnx stays **out** of `requirements.txt` (imported lazily,
+so the app venv is unchanged and the separator simply does not appear there).
+Use `~/Documents/venvs/assassin_venv_v0.4.4_cpu/bin/python` (1.13.4). Models
+come from `Music-Assassin/models/sherpa_onnx/sherpa-onnx-spleeter-2stems-int8/`
+(2 × 26 MB — note the `sherpa_onnx/` path component); `scripts/import_models.py`
+now copies them in under the names the registry looks up.
 
 ## What else landed 2026-08-18
 
@@ -211,6 +241,13 @@ Full list in ROADMAP §10. Live ones:
 - Python: `.venv/bin/python` in the repo root. Models resolve from
   `~/.local/share/music-assassin/models`, the repo's `models/`, or
   `/usr/share/music-assassin-live/models` (the `.deb`'s).
+- **`models_dir()` resolves somewhere surprising under the VS Code snap.** It
+  honours `XDG_DATA_HOME`, and a terminal inside the snap exports
+  `XDG_DATA_HOME=~/snap/code/<rev>/.local/share` — so `~/.local/share/
+  music-assassin/models` is never consulted, resolution falls through to the
+  `.deb`'s `/usr/share` subset, and a run dies with *"model(s) not installed"*
+  naming models that are installed. Set `MUSIC_ASSASSIN_MODELS` explicitly for
+  anything long-running; `run_a1_sweep.sh` warns when it is unset.
 - Corpus and sweep outputs under `~/.local/state/music-assassin/bench/`
   (`corpus/`, `b1/`, `b3/`). **The corpus lives on the machine that built it**
   — `bench_quality.py --corpus` and the sweep scripts' `CORPUS=`/`OUT=` let a
