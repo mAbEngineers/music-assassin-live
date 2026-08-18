@@ -282,6 +282,43 @@ def test_wants_stereo_processor_bypasses_the_rebuild():
     check("its own suppression still applies", supp < -20.0, f"{supp:.1f} dB")
 
 
+def test_measured_latency_tracks_the_extra_framing():
+    """AudioEngine.latency_ms (ROADMAP C4/C7) is measured from the lockstep
+    FIFO rather than summed from nominal parts. The rebuild's framing delay
+    is a known, exact quantity, so it makes a good ruler: turning it on must
+    move the reported latency by that much and nothing else changes."""
+    print("\nmeasured latency")
+    dry = wide_stereo(n=SR)
+
+    eng = AudioEngine(_Gate())
+    eng.set_intensity(1.0)
+    eng._wet_gain = 1.0
+    _pump(eng, dry)
+    off_ms = eng.latency_ms
+
+    eng2 = AudioEngine(_Gate())
+    eng2.set_intensity(1.0)
+    eng2._wet_gain = 1.0
+    eng2.set_stereo(True)
+    _pump(eng2, dry)
+    on_ms = eng2.latency_ms
+
+    expect = 1000.0 * LAT / SR
+    block_ms = 1000.0 * BLOCK / SR
+    # NOT near zero, and it should not be: a block goes to the worker and
+    # its result is only collected by a later callback, so one block of
+    # hand-off is the floor this architecture can reach even with a
+    # zero-latency model. Worth asserting rather than tolerating — it is
+    # most of the gap between the models' nominal latency_ms and the ~50 ms
+    # bench_quality measures end to end.
+    check("floor is one block of queue hand-off, not zero",
+          block_ms * 0.7 <= off_ms <= block_ms * 1.4,
+          f"{off_ms:.1f} ms vs one block = {block_ms:.1f} ms")
+    check("the stereo rebuild's framing delay shows up in the number",
+          abs((on_ms - off_ms) - expect) < 3.0,
+          f"{on_ms:.1f} - {off_ms:.1f} = {on_ms - off_ms:.1f} ms, expected ~{expect:.1f}")
+
+
 def main() -> int:
     print("stereo rebuild tests (no models, no audio hardware required)")
     test_todays_mono_path_collapses_the_image()
@@ -291,6 +328,7 @@ def main() -> int:
     test_streaming_consistency()
     test_engine_emits_a_stereo_wet_signal()
     test_wants_stereo_processor_bypasses_the_rebuild()
+    test_measured_latency_tracks_the_extra_framing()
     print(f"\n{'FAIL' if FAILURES else 'PASS'}"
           + (f" — {len(FAILURES)}: {', '.join(FAILURES)}" if FAILURES else ""))
     return 1 if FAILURES else 0

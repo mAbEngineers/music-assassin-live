@@ -104,6 +104,7 @@ class AudioEngine:
         self._stream = None
         self._worker = None
         self._levels: collections.deque = collections.deque(maxlen=64)
+        self._lag_ema = 0.0      # samples of pipeline delay, smoothed
         self._midside = MidSideFilter()
         self._midside_enabled = False
         self._stereo = StereoRebuild()
@@ -164,6 +165,19 @@ class AudioEngine:
         setter = getattr(self.proc, "set_atten_limit", None)
         if setter:
             setter(self._atten_limit_db)
+
+    @property
+    def latency_ms(self) -> float:
+        """Measured delay between a sample arriving and its processed
+        counterpart leaving, in ms.
+
+        Excludes the output device's own buffer, which the engine cannot
+        see — so this is the latency the app *adds*, which is the number a
+        user watching video wants (ROADMAP C7). Comparable to
+        bench_quality.py's `latency_ms` column, which measures the same
+        span by cross-correlation.
+        """
+        return 1000.0 * self._lag_ema / SAMPLE_RATE
 
     def recent_levels(self) -> list:
         """Copy of the most recent output RMS levels, oldest first — for a
@@ -279,6 +293,7 @@ class AudioEngine:
             self._out = np.zeros((0, 2), dtype=np.float32)
         self._dry_out = np.zeros((0, 2), dtype=np.float32)
         self._dry_work = np.zeros((0, 2), dtype=np.float32)
+        self._lag_ema = 0.0
         self._wet_gain = 0.0
 
     def retarget(self, monitor_source: str, sink_name: str) -> None:
@@ -354,6 +369,16 @@ class AudioEngine:
         if take_dry < frames:
             dry[take_dry:] = indata[take_dry:]  # startup-only fallback
         self._dry_out = self._dry_out[take_dry:]
+        # What is left in the dry FIFO after the drain IS the pipeline's
+        # delay: input that has been fed but whose processed counterpart is
+        # not out yet. Measured rather than summed from nominal parts —
+        # the model's own latency_samples is only one contributor, alongside
+        # the resamplers, the queue hand-off and (when on) the stereo
+        # rebuild, and the sum of the documented figures has never matched
+        # what bench_quality measures end-to-end. Smoothed because _out is
+        # filled by another thread, so any single reading jitters by up to a
+        # block.
+        self._lag_ema = 0.9 * self._lag_ema + 0.1 * len(self._dry_out)
 
         wet = np.empty_like(dry)
         wet[:take] = wet_st

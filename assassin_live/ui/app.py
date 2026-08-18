@@ -28,6 +28,7 @@ TEXT = "#f2f2f4"
 SUBTEXT = "#87878f"
 TRACK = "#2b2b32"
 RED = "#ef4056"
+AMBER = "#e0a458"
 ON_COLOR = "#2ecc71"
 OFF_COLOR = "#3a3d45"
 
@@ -80,9 +81,26 @@ class App:
         self._build_sliders()
         self._update_atten_visibility()
 
+        # Status is two labels, not one: a state-and-health line anyone can
+        # read, and the counters that used to BE the status line, folded
+        # away by default (ROADMAP C4). The counters are not junk — they are
+        # what diagnoses an underrun — they were just never an answer to
+        # "is this working", which is the only question the line is asked
+        # most of the time.
         self.status = tk.Label(self.root, text="idle", justify=tk.LEFT,
                                font=("Mono", 9), bg=BG, fg=SUBTEXT)
-        self.status.pack(pady=(4, 10))
+        self.status.pack(pady=(4, 0))
+        self.details_on = tk.BooleanVar(value=False)
+        self.details_btn = tk.Label(self.root, text="details ▸", font=("Mono", 8),
+                                    bg=BG, fg=SUBTEXT, cursor="hand2")
+        self.details_btn.pack(pady=(2, 0))
+        self.details_btn.bind("<Button-1>", self._toggle_details)
+        self.details = tk.Label(self.root, text="", justify=tk.LEFT,
+                                font=("Mono", 8), bg=BG, fg=SUBTEXT)
+        self.details.pack(pady=(0, 10))
+        self.details.pack_forget()
+        self._prev_xruns = 0
+        self._prev_fallbacks = 0
 
         self.enabled = False
         # The capture diagnosis costs a pw-dump, and the states it catches
@@ -405,12 +423,12 @@ class App:
         if sink is None:
             return
         try:
-            self.status.config(text=f"output → {self._switch_output(sink, True)}")
+            self._say(f"output → {self._switch_output(sink, True)}")
         except Exception as e:  # noqa: BLE001 — a failed switch must not wedge
             # the app in a state where the dropdown says one thing and the
             # audio does another; drop to a clean off.
             self._turn_off()
-            self.status.config(text=f"could not switch output, turned off: {e}")
+            self._say(f"could not switch output, turned off: {e}", RED)
 
     # -- actions ---------------------------------------------------------------
     def _toggle(self):
@@ -450,6 +468,44 @@ class App:
     # How often to verify what we are capturing, in ticks (~1 s each).
     CAPTURE_CHECK_TICKS = 5
 
+    # Blocks that fell back to dry within one tick (~50 blocks) before the
+    # line stops saying "healthy". A handful is normal right after a device
+    # change; a steady stream means the worker is not keeping up and the
+    # user is hearing unprocessed audio without being told.
+    FALLBACK_WARN_PER_TICK = 5
+
+    def _say(self, text: str, colour: str = SUBTEXT) -> None:
+        """Every write to the status line goes through here.
+
+        The line's colour became meaningful with C4's health word, which
+        makes a stale colour a lie: a red "stream stopped" left in place
+        would tint the next perfectly ordinary message. Setting both every
+        time is the only way that stays true as messages are added.
+        """
+        self.status.config(text=text, fg=colour)
+
+    def _toggle_details(self, _evt=None):
+        self.details_on.set(not self.details_on.get())
+        if self.details_on.get():
+            self.details.pack(pady=(0, 10))
+            self.details_btn.config(text="details ▾")
+        else:
+            self.details.pack_forget()
+            self.details_btn.config(text="details ▸")
+
+    def _health(self, stats) -> tuple:
+        """(word, colour) for the status line — what a user needs to know
+        about whether this is working, in one word."""
+        if self.engine is None or not self.engine.stream_ok:
+            return "stream stopped", RED
+        d_fallback = stats.fallback_blocks - self._prev_fallbacks
+        d_xruns = stats.xruns - self._prev_xruns
+        if d_fallback >= self.FALLBACK_WARN_PER_TICK:
+            return f"struggling ({d_fallback} blocks dry)", AMBER
+        if d_xruns:
+            return f"{d_xruns} xrun{'s' if d_xruns > 1 else ''}", AMBER
+        return "healthy", ON_COLOR
+
     def _check_capture(self) -> bool:
         """Verify the audio reaching the model is the audio we intended.
 
@@ -477,14 +533,14 @@ class App:
             # repair would likely fail anyway. Stop first, explain, let the
             # user switch back on.
             self._turn_off()
-            self.status.config(
-                text="feedback loop detected (capturing our own output) — turned off")
+            self._say("feedback loop detected (capturing our own output) — turned off",
+                      RED)
             return True
 
         if state == "trap_lost":
             self._turn_off()
-            self.status.config(
-                text="audio device disappeared — turned off, switch back on to rebuild")
+            self._say("audio device disappeared — turned off, switch back on to rebuild",
+                      RED)
             return True
 
         # capture_hijacked: wrong source, but not a loop, so nothing is
@@ -497,11 +553,10 @@ class App:
         except Exception:  # noqa: BLE001 — fall through to turning off
             repaired = False
         if repaired:
-            self.status.config(text="capture was mis-routed — reconnected")
+            self._say("capture was mis-routed — reconnected", AMBER)
             return False
         self._turn_off()
-        self.status.config(
-            text="capture is connected to the wrong device — turned off")
+        self._say("capture is connected to the wrong device — turned off", RED)
         return True
 
     def _turn_off(self):
@@ -543,10 +598,10 @@ class App:
                 try:
                     self.engine.retarget(self.routing.monitor_source,
                                          self.routing.real.name)
-                    self.status.config(text="audio stream recovered automatically")
+                    self._say("audio stream recovered automatically", AMBER)
                 except Exception as e:  # noqa: BLE001 — see retarget handling below
                     self._turn_off()
-                    self.status.config(text=f"audio stream died, restart failed: {e}")
+                    self._say(f"audio stream died, restart failed: {e}", RED)
                 return
             event = self.routing.check()
             if event in ("real_sink_changed", "real_sink_replaced") and self.routing.real:
@@ -567,16 +622,16 @@ class App:
                     # instead of leaving the trap sink stuck as default with
                     # no audio flowing.
                     self._turn_off()
-                    self.status.config(text=f"retarget failed, turned off: {e}")
+                    self._say(f"retarget failed, turned off: {e}", RED)
                     return
-                self.status.config(
-                    text=f"output → {label}" if chosen
-                    else f"previous output disappeared — now on {label}")
+                self._say(f"output → {label}" if chosen
+                          else f"previous output disappeared — now on {label}",
+                          SUBTEXT if chosen else AMBER)
                 self.root.after(1000, self._tick)
                 return
             elif event == "real_sink_lost":
                 self._turn_off()
-                self.status.config(text="output device lost — turned off")
+                self._say("output device lost — turned off", RED)
                 return
             elif event == "trap_lost":
                 # Our interception device is gone from the system (crash,
@@ -585,8 +640,8 @@ class App:
                 # speakers directly, so off is both the correct state and
                 # the current one — say so rather than pretending to filter.
                 self._turn_off()
-                self.status.config(
-                    text="audio device disappeared — turned off, switch back on to rebuild")
+                self._say("audio device disappeared — turned off, switch back on to rebuild",
+                          RED)
                 return
 
             self._capture_tick += 1
@@ -598,14 +653,22 @@ class App:
             if s:
                 out = self.routing.real.description or self.routing.real.name \
                     if self.routing.real else "?"
-                self.status.config(text=(
-                    f"out: {out}\n"
-                    f"model: {self.model.get()}  "
-                    f"{s.worker_ms_avg:.1f} ms/block (20 ms budget)\n"
-                    f"blocks: {s.blocks_in}   fallbacks: {s.fallback_blocks}   "
-                    f"xruns: {s.xruns}"))
+                word, colour = self._health(s)
+                self._prev_fallbacks, self._prev_xruns = s.fallback_blocks, s.xruns
+                # Latency is measured, not nominal, and it is the first thing
+                # anyone watching video wants to know (ROADMAP C7).
+                self._say(
+                    f"Filtering → {out} · {self.engine.latency_ms:.0f} ms · {word}",
+                    colour)
+                if self.details_on.get():
+                    self.details.config(text=(
+                        f"model: {self.model.get()}  "
+                        f"{s.worker_ms_avg:.1f} ms/block (20 ms budget)\n"
+                        f"blocks: {s.blocks_in}   fallbacks: {s.fallback_blocks}   "
+                        f"xruns: {s.xruns}"))
         elif not self.enabled:
-            self.status.config(text="idle")
+            self._say("idle")
+            self.details.config(text="")
         self._refresh_outputs()
         self.root.after(1000, self._tick)
 

@@ -955,11 +955,38 @@ including that the last case does **not** re-assert a destroyed node id,
 which is what C8's incident did once a second, forever, while reporting
 healthy.
 
-### C4. Human-readable status
+### C4. Human-readable status ✅ done 2026-08-18
 
 The status line is a debug dump (`blocks: 48213  fallbacks: 0  xruns: 2`).
 Users need state and health: "Filtering → Soundcore Q20i · 12 ms latency ·
 healthy". Keep the counters behind a details toggle.
+
+**Done 2026-08-18**, as specified: `Filtering → <device> · <n> ms · <health>`,
+with the counters behind a `details ▸` toggle. They were never junk — they are
+what diagnoses an underrun — they were just never an answer to "is this
+working", which is the only question the line is asked most of the time.
+
+**Health is the part with a judgement in it**, so it is the part with tests.
+It reports, in priority order: `stream stopped` (red) when the stream is dead,
+`struggling (N blocks dry)` (amber) when more than `FALLBACK_WARN_PER_TICK`
+blocks fell back to dry within a tick, `N xruns` (amber), else `healthy`
+(green). The failure it exists to catch is the quiet one — audio flowing, the
+stream alive, nothing crashed, and the filter not actually filtering.
+
+**Counters are read as deltas per tick, not lifetime totals.** A long session
+accumulates fallbacks and xruns forever; reading totals would leave the line
+permanently degraded after one hiccup an hour ago, which trains people to
+ignore it.
+
+**Every status write now goes through `_say(text, colour)`.** The colour
+became meaningful with the health word, and that makes a stale colour a lie —
+a red "stream stopped" left in place would tint the next ordinary message.
+There are eleven such messages now (C1, C3, C8 added six), so setting both
+every time is the only thing that stays true as more are added.
+
+`tests/test_status_line.py` covers the decision without Tk, built with
+`object.__new__` because constructing the real app builds widgets and takes
+over a display.
 
 ### C5. Tray icon, autostart, and the ON-state question
 
@@ -977,11 +1004,30 @@ only `passthrough`, with no explanation. Add first-run detection + a model
 download (depends on A3's data-driven registry and on models being published as
 release assets).
 
-### C7. Surface latency
+### C7. Surface latency ✅ done 2026-08-18, with C4
 
 Nothing in the UI states the added latency (~45–70 ms by design). For anyone
 watching video this is the first thing they'll want to know, and it becomes
 critical if A1 lands with a chunk-size-driven latency budget.
+
+**Done 2026-08-18** as part of C4's line, and **measured rather than
+declared**: `AudioEngine.latency_ms` reads the depth of the lockstep dry FIFO,
+which *is* the pipeline's delay — input that has been fed but whose processed
+counterpart is not out yet. Summing nominal figures would have been wrong: the
+sum of the models' documented `latency_ms` has never matched the ~50 ms
+`bench_quality` measures end to end, and this explains why.
+
+**The gap is one block of queue hand-off.** A block goes to the worker and its
+result is collected by a later callback, so ~20 ms is the floor this
+architecture reaches *even with a zero-latency processor* — measured at 19.9 ms
+in `tests/test_stereo_rebuild.py`, which asserts it rather than tolerating it.
+Together with the model's own delay and the resamplers, that is the ~50 ms.
+Worth knowing before A1: a chunked separator's latency budget starts 20 ms in
+debt, and halving `BLOCK` is the lever on that, not the model.
+
+Excludes the output device's own buffer, which the engine cannot see — so the
+number is what the app *adds*, which is the number a user watching video
+wants.
 
 ### C8. Detect an orphaned or hijacked capture stream ✅ done 2026-08-18
 
@@ -1262,10 +1308,8 @@ entry ticket to a Windows APO later. Not near-term.
 15. ~~**C8 — detect an orphaned/hijacked capture stream.**~~ Done
     2026-08-18, the same day it was found by causing it. The app no longer
     reports itself healthy while capturing its own output. See C8.
-16. ~~**C3 — coherent system-picker behavior.**~~ Done 2026-08-18, largely
-    as a consequence of C1: three of its four problems existed only because
-    a retarget was expensive. **C4 — human status line** still open, and it
-    now has six status messages from C1/C3/C8 to render.
+16. ~~**C3 — coherent system-picker behavior**, **C4 — human status line**
+    (and **C7**, latency, which C4's line carries).~~ All done 2026-08-18.
 17. **E1 — CI** (scoped smaller than it looks; see E1).
 
 ### Phase 3 — Make it actually remove music (weeks)
