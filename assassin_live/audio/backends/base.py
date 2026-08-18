@@ -74,6 +74,23 @@ class RoutingBackend(Protocol):
         """
         ...
 
+    def sync_volume(self) -> "tuple | None":
+        """Mirror any volume/mute the user made on the trap device onto the
+        real output device, so the volume keys keep working while the filter
+        is inserted. Called on the same ~1 s tick as check().
+
+        Returns the (volume, muted) that was applied if anything moved, else
+        None. A platform whose interception does not sit between the volume
+        controls and the output may return None always.
+        """
+        ...
+
+    def adopt_volume(self) -> None:
+        """Seed the mirror from the real device's current level, so
+        inserting the filter neither changes how loud anything is nor makes
+        the system slider jump. Called once, right after enable()."""
+        ...
+
     def retarget_playback(self, pid: int, sink_name: str) -> bool:
         """Move a running stream's playback endpoint to `sink_name` without
         closing it, leaving capture and the processor's state alone.

@@ -456,6 +456,7 @@ class App:
             self.engine.set_atten_limit(self.atten_db)
             self._push_mutes()
             self.engine.start(self.routing.monitor_source, real.name)
+            self.routing.adopt_volume()
             self.enabled = True
             self.btn.config(text="ON", bg=ON_COLOR, activebackground=ON_COLOR)
         except Exception as e:  # noqa: BLE001 — surface anything to the user
@@ -603,6 +604,14 @@ class App:
                     self._turn_off()
                     self._say(f"audio stream died, restart failed: {e}", RED)
                 return
+            # Volume keys act on the trap while it is the default sink, and
+            # its output goes nowhere — so without this they do nothing at
+            # all (ROADMAP C2). One cheap wpctl read per tick.
+            try:
+                self.routing.sync_volume()
+            except Exception:  # noqa: BLE001 — a volume mirror that cannot
+                # run is a wart, not a reason to interrupt the audio path.
+                pass
             event = self.routing.check()
             if event in ("real_sink_changed", "real_sink_replaced") and self.routing.real:
                 # Someone chose a device in the system menu, or the one we

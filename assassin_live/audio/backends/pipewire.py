@@ -218,6 +218,27 @@ def create_trap_sink(timeout_s: float = 3.0) -> SinkInfo:
     raise RuntimeError("trap sink did not appear in the PipeWire graph")
 
 
+def get_volume(node_id: int) -> tuple | None:
+    """(volume, muted) for a node, or None if it could not be read."""
+    try:
+        out = _run(["wpctl", "get-volume", str(node_id)])
+    except subprocess.SubprocessError:
+        return None
+    m = re.search(r"Volume:\s*([0-9.]+)", out)
+    if not m:
+        return None
+    return float(m.group(1)), "[MUTED]" in out
+
+
+def set_volume(node_id: int, volume: float, muted: bool) -> None:
+    for cmd in (["wpctl", "set-volume", str(node_id), f"{max(0.0, volume):.4f}"],
+                ["wpctl", "set-mute", str(node_id), "1" if muted else "0"]):
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=10)
+        except subprocess.SubprocessError:
+            pass
+
+
 def pin_process_streams(pid: int, capture_sink: str | None, playback_sink: str,
                         timeout_s: float = 3.0) -> bool:
     """Point this process's audio streams at explicit sinks.
@@ -305,6 +326,7 @@ class PipeWireBackend:
         self.preferred_name: str | None = None  # user-picked output sink, if any
         self._pending: SinkInfo | None = None
         self._pending_since: float = 0.0
+        self._last_trap_volume: tuple | None = None
 
     def _pick_real(self, fallback: SinkInfo | None) -> SinkInfo | None:
         if self.preferred_name:
@@ -356,6 +378,7 @@ class PipeWireBackend:
         if self.trap:
             destroy_node(self.trap.id)
         self.trap = self.real = None
+        self._last_trap_volume = None
         ROUTING_STATE.unlink(missing_ok=True)
 
     # -- supervision ----------------------------------------------------------
@@ -406,6 +429,56 @@ class PipeWireBackend:
                 (s for s in list_sinks() if s.name != SINK_NAME), None)
             return "real_sink_replaced" if self.real else "real_sink_lost"
         return None
+
+    def sync_volume(self) -> tuple | None:
+        """Make the volume keys work again by mirroring the trap's volume
+        and mute onto the real output sink (ROADMAP C2).
+
+        While filtering, the trap is the system default, so the volume keys
+        and the system slider act on *it* — and its output goes nowhere,
+        because the engine plays to the real sink directly. The keys are
+        therefore inert: pressing volume-down changes a number on a null
+        sink and nothing else.
+
+        MEASURED, and not what C2 originally assumed (see
+        scripts/spike_c2_monitor_volume.py): a sink's volume does NOT scale
+        its monitor. A tone captured from a monitor at sink volume 1.0 and
+        0.5 came back at identical RMS, ratio 1.000. So the volume slider
+        never was changing what the model is fed, and this does not need to
+        pin the trap at unity to protect the model.
+
+        That matters for the design, not just the rationale. Because the
+        trap's volume is harmless, it can be left where the user put it —
+        so the system slider and the on-screen volume display keep showing
+        the level they chose, instead of snapping back to 100% forever,
+        which is what pinning would have done.
+
+        Mirrors only when the trap's value *changes*, so adjusting the real
+        sink directly (in a mixer, say) is not immediately overwritten.
+        """
+        if not (self.trap and self.real):
+            return None
+        trap = get_volume(self.trap.id)
+        if trap is None or trap == self._last_trap_volume:
+            return None
+        first = self._last_trap_volume is None
+        self._last_trap_volume = trap
+        if first:
+            return None      # the initial reading is a baseline, not a change
+        set_volume(self.real.id, trap[0], trap[1])
+        return trap
+
+    def adopt_volume(self) -> None:
+        """Start the mirror from the real sink's current level, so enabling
+        the filter does not change how loud anything is and the slider does
+        not jump."""
+        if not (self.trap and self.real):
+            return
+        real = get_volume(self.real.id)
+        if real is None:
+            return
+        set_volume(self.trap.id, real[0], real[1])
+        self._last_trap_volume = real
 
     def retarget_playback(self, pid: int, sink_name: str) -> bool:
         """Move a RUNNING stream's playback endpoint, without closing it.

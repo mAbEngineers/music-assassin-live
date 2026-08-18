@@ -880,7 +880,7 @@ a separate change with its own risk; the test is to null out the env vars and
 confirm a freshly-opened stream still lands correctly on the strength of
 `pin_stream()` alone.
 
-### C2. Forward volume keys to the real sink
+### C2. Forward volume keys to the real sink ✅ done 2026-08-18 — but its stated reason was wrong
 
 With the trap sink as system default, the volume keys and system slider scale
 the *captured* signal, not the output — so turning the volume down changes what
@@ -902,6 +902,44 @@ this is fixed the hardware tier has a free variable in it and its absolute
 numbers should not be compared across runs. Caveat: reproducing the full
 offline-vs-hardware gap needed ~+18–30 dB, more than typical OS volume range,
 so this is likely one contributor among several rather than the whole story.
+
+---
+
+**The paragraph above is wrong, and is kept only so the correction has
+something to point at. Measured 2026-08-18,
+`scripts/spike_c2_monitor_volume.py`: a sink's volume does NOT scale its
+monitor.** A 440 Hz tone played into a null sink and captured from that sink's
+monitor came back at identical RMS at sink volume 1.0 and 0.5 — ratio
+**1.000**, and that RMS was exactly the tone's as generated. Monitors are
+pre-volume. **The system volume slider was never changing what the model is
+fed**, so the measurement-confound argument that promoted this item does not
+hold, and §2.1's level-sensitivity has no bearing on it.
+
+**What is actually wrong is worse in one way and easier in another.** The keys
+do not mis-scale the capture — they do *nothing at all*. They act on the trap,
+because it is the default sink, and the trap's output goes nowhere: the engine
+plays to the real device directly. So while filtering is on, volume-down
+changes a number on a null sink and the audio does not move.
+
+**And the fix is better than the one specified above.** Pinning the trap at
+100% is unnecessary — its volume is harmless — and would have been actively
+bad: the system slider and the on-screen volume display follow the *default*
+sink, so pinning would have made them snap back to 100% forever, showing a
+level that was never the user's. Instead the trap's volume is left exactly
+where the user put it, and mirrored:
+
+- `sync_volume()` — mirrors volume and mute onto the real sink, and only when
+  the trap's value *changes*, so adjusting the real device directly in a mixer
+  is not stamped on once a second.
+- `adopt_volume()` — seeds the trap from the real device's level at enable
+  time, so switching the filter on neither changes how loud anything is nor
+  makes the slider jump.
+
+`tests/test_volume_mirror.py` covers it with a stand-in mixer.
+
+**This reopens a real question.** The `noise_only` swing of −55.7 → −21.7 dB
+across two identical hardware runs had C2 as its standing explanation, and
+that explanation is now dead. See E2.
 
 ### C3. Stop fighting the system output picker ✅ done 2026-08-18
 
@@ -1235,9 +1273,14 @@ entry ticket to a Windows APO later. Not near-term.
   it with different levels. Next step is a level sweep through both paths
   before trusting either number. **Resolved 2026-08-14 — see §2.1/§2.2:** the
   cause was a real defect (discarded ONNX normalization metadata), now fixed
-  on `fix/dpdfnet-norm-init`. The hardware tier still has one uncontrolled
-  variable left in it, though — the unpinned trap-sink volume (C2) — so its
-  absolute numbers should not be compared across runs until that is fixed.
+  on `fix/dpdfnet-norm-init`. **The `noise_only` swing is still unexplained,
+  and as of 2026-08-18 has no candidate at all.** C2's unpinned trap-sink
+  volume was the standing explanation until it was measured and found
+  impossible: sink volume does not scale a monitor (ratio 1.000, see C2), so
+  the slider cannot have been changing what the model was fed. Something
+  varies between two identical hardware runs by 34 dB and nothing currently
+  accounts for it. Do not treat that tier's absolute numbers as reproducible
+  until it is found.
 - **E3. Resolve `speechdenoiser`'s license** (upstream has no license file) or
   re-export from dual-licensed DeepFilterNet3. Until then it must not ship as
   a release asset — local dev only.
@@ -1296,8 +1339,11 @@ entry ticket to a Windows APO later. Not near-term.
     ~1.5 ms of callback jitter and no xruns, so the teardown path is gone
     for output changes. It also exposed the `pipewire.sec.pid` matching bug
     that had quietly disabled `pin_stream()` (and C8's detector). See C1.
-12. **C2 — volume-key forwarding.** Promoted: it is now a suspected
-    measurement confound, not only a UX wart (see C2).
+12. ~~**C2 — volume-key forwarding.**~~ Done 2026-08-18 — though the reason
+    it was promoted turned out to be false (sink volume does not scale a
+    monitor; measured, ratio 1.000). The real bug was that the keys did
+    nothing at all, and the fix is better than the one planned. Note that
+    E2's unexplained hardware-tier variance has lost its only candidate.
 13. ~~**A6 — report input RMS in `bench_offline()`.**~~ Done 2026-08-15 —
     §4 A6 has recorded it as landed since then; this line said otherwise
     until 2026-08-18.
@@ -1413,6 +1459,12 @@ All measured, all negative — do not re-investigate:
   processor.
 
 ### Claims that did not survive re-measurement
+
+- **"The system volume slider changes what the model is fed."** Believed since
+  2026-08-14, and the reason C2 was promoted from a UX wart to a measurement
+  confound. Disproven 2026-08-18 by direct measurement: a tone captured from a
+  sink's monitor is identical at sink volume 1.0 and 0.5 (ratio 1.000) —
+  monitors are pre-volume. The volume keys were inert, not corrupting.
 
 - **"dpdfnet_hr does real music-vs-voice separation."** Believed since
   2026-07-24 on the strength of its −30 dB music figure. Disproven in §2.2:

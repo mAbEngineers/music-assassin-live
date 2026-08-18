@@ -162,9 +162,26 @@ the case it caused; it does not make the test safe in general.
    flip — or don't flip — the stereo default on what it says. This is the
    only thing standing between the −161 dB image collapse and it being
    fixed for real; the code is written and tested.
-4. Then Phase 2 in the roadmap: **C2** volume forwarding (the biggest one
-   left, and not only a UX wart — see C2), **C4** a human-readable status
-   line, **E1** CI. (**C1**, **C3** and **C8** are done — see below.)
+4. Then Phase 2 in the roadmap: **E1** CI is what is left — there are now
+   eight hardware-free test files and nothing runs them automatically.
+   (**C1**, **C2**, **C3**, **C4**, **C7** and **C8** are all done — see
+   below.)
+
+**One belief was retracted today, and it matters more than the feature that
+retracted it.** C2 was promoted from a UX wart to a *measurement confound* on
+the reasoning that the trap sink being default meant the volume slider was
+scaling what the model is fed — which, given §2.1's ~36 dB level sensitivity,
+would corrupt every hardware-tier number. Measured directly
+(`scripts/spike_c2_monitor_volume.py`): a tone captured from a sink's monitor
+is **identical** at sink volume 1.0 and 0.5, ratio 1.000. Monitors are
+pre-volume. The keys were never corrupting the capture — they were doing
+nothing at all, because the trap's output goes nowhere.
+
+So the volume mirror still shipped (the keys work now, and the slider keeps
+showing the level you chose rather than being pinned to 100%), but **E2's
+`noise_only` swing of −55.7 → −21.7 dB across two identical hardware runs has
+lost its only explanation and is now unaccounted for.** Do not treat that
+tier's absolute numbers as reproducible.
 
 ## C1 and C8 are done (2026-08-18)
 
