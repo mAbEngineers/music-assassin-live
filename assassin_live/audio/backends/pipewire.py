@@ -280,12 +280,24 @@ class PipeWireBackend:
     Satisfies RoutingBackend (backends/base.py) structurally.
     """
 
-    # a candidate replacement sink must be observed as the system default
-    # for this long, continuously, before we act on it — otherwise a
-    # flapping device (BT reconnect loop, a race with WirePlumber's own
-    # default-sink assignment) triggers a full engine restart on every
-    # tick, and each restart is an audible glitch.
-    RETARGET_DEBOUNCE_S = 1.5
+    # A candidate replacement sink must be observed as the system default
+    # for this long, continuously, before we act on it.
+    #
+    # Was 1.5 s, for a reason that stopped being true when C1 landed: acting
+    # meant a full engine restart, and each restart was an audible glitch,
+    # so a flapping device (BT reconnect loop, a race with WirePlumber's own
+    # default-sink assignment) had to be waited out. A retarget now costs a
+    # metadata write — measured at 0.01–0.04 s with ~1.5 ms of callback
+    # jitter and no xruns (ROADMAP C1) — so thrashing is close to free while
+    # the wait is not: 1.5 s is precisely the lag that makes picking a
+    # device in the system menu feel broken (ROADMAP C3).
+    #
+    # It does not go to zero, because rejecting a transient is still worth
+    # something — WirePlumber briefly assigns a default of its own while
+    # devices settle, and following that would move the audio somewhere the
+    # user never chose. This is now sized to outlast that race and nothing
+    # more.
+    RETARGET_DEBOUNCE_S = 0.25
 
     def __init__(self):
         self.trap: SinkInfo | None = None
@@ -384,9 +396,15 @@ class PipeWireBackend:
         # default is still us; make sure our output device still exists
         self._pending = None
         if self.real and not any(s.name == self.real.name for s in list_sinks()):
+            # Distinct from 'real_sink_changed' on purpose. That one means a
+            # human picked a device and we should follow and remember it;
+            # this one means the device they picked went away and we found
+            # something else. Conflating them makes a sleeping Bluetooth
+            # headset silently overwrite the user's saved output choice with
+            # whatever happened to be left.
             self.real = next(
                 (s for s in list_sinks() if s.name != SINK_NAME), None)
-            return "real_sink_changed" if self.real else "real_sink_lost"
+            return "real_sink_replaced" if self.real else "real_sink_lost"
         return None
 
     def retarget_playback(self, pid: int, sink_name: str) -> bool:

@@ -57,10 +57,21 @@ class RoutingBackend(Protocol):
         ...
 
     def check(self) -> "str | None":
-        """Returns None (all good), 'real_sink_changed', 'real_sink_lost',
-        or 'trap_lost' (the interception device itself is gone from the
-        system — nothing can be re-asserted, the session has to be rebuilt
-        or stopped)."""
+        """Returns None (all good) or one of:
+
+        'real_sink_changed'   someone made another device the system
+                              default — treat as explicit user intent:
+                              follow it, and remember it.
+        'real_sink_replaced'  the device we were playing to vanished and a
+                              fallback was chosen. Follow it, but do NOT
+                              remember it — the user's choice did not
+                              change, their hardware did.
+        'real_sink_lost'      it vanished and there is nothing to fall back
+                              to.
+        'trap_lost'           the interception device itself is gone —
+                              nothing can be re-asserted, the session has to
+                              be rebuilt or stopped.
+        """
         ...
 
     def retarget_playback(self, pid: int, sink_name: str) -> bool:

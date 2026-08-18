@@ -162,9 +162,9 @@ the case it caused; it does not make the test safe in general.
    flip — or don't flip — the stereo default on what it says. This is the
    only thing standing between the −161 dB image collapse and it being
    fixed for real; the code is written and tested.
-4. Then Phase 2 in the roadmap: **C2** volume forwarding, **C4** a
-   human-readable status line, **C3** coherent picker behaviour. (**C1**
-   and **C8** are done — see below.)
+4. Then Phase 2 in the roadmap: **C2** volume forwarding (the biggest one
+   left, and not only a UX wart — see C2), **C4** a human-readable status
+   line, **E1** CI. (**C1**, **C3** and **C8** are done — see below.)
 
 ## C1 and C8 are done (2026-08-18)
 
@@ -176,6 +176,17 @@ three times on real hardware: link moves in 0.01–0.04 s, worst callback gap
 21.4 ms against a 20 ms block period, zero xruns, callbacks never stop. So
 the multi-second dropout *and* the reset model state are both gone, and the
 gain-ramp rung C1 held in reserve is not needed.
+
+**C3 — the app stops fighting the system picker**, mostly as a consequence
+of C1: three of its four problems existed only because a retarget was
+expensive. The debounce is 1.5 s → 0.25 s, the dropdown follows external
+changes instead of showing a stale device, and all three routes into an
+output change (our dropdown, the system picker, a device vanishing) go
+through one path — the app's own dropdown had still been using the *heavy*
+retarget, so picking a device in the app was slower than picking one in the
+system menu. `real_sink_changed` also split in two: a device vanishing is no
+longer mistaken for a user choice, which previously meant a sleeping
+Bluetooth headset would silently overwrite the saved output preference.
 
 **C8 — the app now checks what it is capturing**, every ~5 s, and turns off
 immediately on a feedback loop rather than attempting a repair that would

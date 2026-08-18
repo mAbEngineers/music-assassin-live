@@ -903,7 +903,7 @@ numbers should not be compared across runs. Caveat: reproducing the full
 offline-vs-hardware gap needed ~+18–30 dB, more than typical OS volume range,
 so this is likely one contributor among several rather than the whole story.
 
-### C3. Stop fighting the system output picker
+### C3. Stop fighting the system output picker ✅ done 2026-08-18
 
 `RoutingSession.check()` re-asserts the trap sink as default within 1 s of
 anything stealing it, then waits out a 1.5 s debounce before treating the
@@ -915,6 +915,45 @@ app retargets — with no feedback that it understood. Meanwhile
 Treat "default sink changed to X" as an explicit user intent: update the
 dropdown to X immediately, show "switching output → X", then retarget. Same
 mechanism, coherent story.
+
+**Done 2026-08-18, and mostly *because* C1 landed** — three of the four
+problems here were consequences of a retarget being expensive.
+
+**The 1.5 s debounce is now 0.25 s.** Its comment said why it existed: acting
+meant a full engine restart and "each restart is an audible glitch", so a
+flapping device had to be waited out. A retarget is now a metadata write at
+0.01–0.04 s (C1), so thrashing is nearly free while the wait is not — 1.5 s
+is exactly the lag that makes the system picker feel broken. It does not go
+to zero: WirePlumber briefly assigns a default of its own while devices
+settle, and following that would move audio somewhere nobody chose. It is now
+sized to outlast that race and nothing more.
+
+**`real_sink_changed` split into two events.** It previously also fired when
+our device *vanished* and a fallback was picked — so "a human chose this" and
+"their headphones went to sleep" were the same signal. That matters now that
+the app remembers the choice: conflated, a sleeping Bluetooth headset
+silently overwrites the saved output preference with whatever was left.
+`real_sink_replaced` is followed but deliberately not remembered.
+
+**One route into an output change.** The app's own dropdown was still calling
+the heavy `retarget()` — after C1 landed, picking a device *in the app* was
+slower than picking one in the system menu. All three routes (our dropdown,
+the system picker, a device vanishing) now go through `_switch_output()`,
+which tries the live move and falls back; they differ only in whether the
+choice is remembered and what the status line says.
+
+**The dropdown follows the system.** It updates on an external change instead
+of continuing to display the old device — a picker that disagrees with the
+system being the actual complaint. `_refresh_outputs()` runs first so a
+device that just appeared is already in the list.
+
+`tests/test_routing_events.py` covers `check()`, which carried every routing
+decision the app makes and had no test at all: steady state, a user pick
+crossing the debounce, a flapping device never being followed, our device
+vanishing, nothing left to fall back to, and the trap itself vanishing —
+including that the last case does **not** re-assert a destroyed node id,
+which is what C8's incident did once a second, forever, while reporting
+healthy.
 
 ### C4. Human-readable status
 
@@ -1223,7 +1262,10 @@ entry ticket to a Windows APO later. Not near-term.
 15. ~~**C8 — detect an orphaned/hijacked capture stream.**~~ Done
     2026-08-18, the same day it was found by causing it. The app no longer
     reports itself healthy while capturing its own output. See C8.
-16. **C3 — coherent system-picker behavior**, **C4 — human status line.**
+16. ~~**C3 — coherent system-picker behavior.**~~ Done 2026-08-18, largely
+    as a consequence of C1: three of its four problems existed only because
+    a retarget was expensive. **C4 — human status line** still open, and it
+    now has six status messages from C1/C3/C8 to render.
 17. **E1 — CI** (scoped smaller than it looks; see E1).
 
 ### Phase 3 — Make it actually remove music (weeks)

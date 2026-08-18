@@ -367,17 +367,50 @@ class App:
                         break
             self.output_var.set(default_label if default_label in labels else labels[0])
 
+    def _switch_output(self, sink, remember: bool) -> str:
+        """Point the engine at `sink`, cheaply if possible.
+
+        The single route into an output change, whichever of the three ways
+        it was asked for (our dropdown, the system picker, a device
+        vanishing) — they differ only in whether the choice is worth
+        remembering and what to say about it, not in how the switch is made.
+
+        `remember=False` for a device that vanished: the user's saved choice
+        did not change, their hardware did, and persisting the fallback
+        would quietly lose the device they actually want whenever their
+        headphones sleep.
+        """
+        self.routing.real = sink
+        if remember:
+            self.routing.preferred_name = sink.name
+        label = sink.description or sink.name
+        # Keep the dropdown honest even when the change came from outside
+        # the app — a picker that disagrees with the system is C3's whole
+        # complaint. Setting the variable does not fire <<ComboboxSelected>>,
+        # so this cannot recurse back into _on_output_change.
+        if label in self.output_map:
+            self.output_var.set(label)
+        if not (self.enabled and self.engine):
+            return label
+        if not self.engine.retarget_output(sink.name):
+            self.engine.retarget(self.routing.monitor_source, sink.name)
+        return label
+
     def _on_output_change(self, _evt=None):
         name = self.output_map.get(self.output_var.get())
         if not name:
             return
         self.routing.preferred_name = name
-        if self.enabled and self.engine:
-            for s in list_sinks():
-                if s.name == name:
-                    self.routing.real = s
-                    self.engine.retarget(self.routing.monitor_source, s.name)
-                    break
+        sink = next((s for s in list_sinks() if s.name == name), None)
+        if sink is None:
+            return
+        try:
+            self.status.config(text=f"output → {self._switch_output(sink, True)}")
+        except Exception as e:  # noqa: BLE001 — a failed switch must not wedge
+            # the app in a state where the dropdown says one thing and the
+            # audio does another; drop to a clean off.
+            self._turn_off()
+            self.status.config(text=f"could not switch output, turned off: {e}")
 
     # -- actions ---------------------------------------------------------------
     def _toggle(self):
@@ -516,20 +549,19 @@ class App:
                     self.status.config(text=f"audio stream died, restart failed: {e}")
                 return
             event = self.routing.check()
-            if event == "real_sink_changed" and self.routing.real:
+            if event in ("real_sink_changed", "real_sink_replaced") and self.routing.real:
+                # Someone chose a device in the system menu, or the one we
+                # were using disappeared. Either way follow it now rather
+                # than after a debounce — a retarget is a metadata write
+                # (C1), so there is nothing left to amortise — and say so,
+                # which is the feedback C3 says is missing.
+                chosen = event == "real_sink_changed"
+                # Before selecting it: a device that just appeared is not in
+                # the dropdown's list yet, and _switch_output only sets the
+                # variable to a label the list actually contains.
+                self._refresh_outputs()
                 try:
-                    # Try to move only the playback endpoint first (C1): the
-                    # capture side and the model are unaffected by where the
-                    # result is played, so the multi-second teardown below is
-                    # the wrong tool for this whenever the live move works.
-                    if self.engine.retarget_output(self.routing.real.name):
-                        self.status.config(
-                            text=f"switched output → "
-                                 f"{self.routing.real.description or self.routing.real.name}")
-                        self.root.after(1000, self._tick)
-                        return
-                    self.engine.retarget(self.routing.monitor_source,
-                                         self.routing.real.name)
+                    label = self._switch_output(self.routing.real, remember=chosen)
                 except Exception as e:  # noqa: BLE001 — a broken stream must not
                     # wedge the app; drop back to a clean, known-off state
                     # instead of leaving the trap sink stuck as default with
@@ -537,6 +569,11 @@ class App:
                     self._turn_off()
                     self.status.config(text=f"retarget failed, turned off: {e}")
                     return
+                self.status.config(
+                    text=f"output → {label}" if chosen
+                    else f"previous output disappeared — now on {label}")
+                self.root.after(1000, self._tick)
+                return
             elif event == "real_sink_lost":
                 self._turn_off()
                 self.status.config(text="output device lost — turned off")
