@@ -40,6 +40,16 @@ run_once () {  # run_once <name> <args...>
   echo "== $name: starting $(date '+%H:%M:%S')"
   $PY tests/bench_quality.py "$@" --corpus "$CORPUS" \
       --csv "$OUT/$name.csv" 2>&1 | tee "$OUT/$name.txt"
+  # PIPESTATUS, not $?, which is tee's. Without this a step that dies on a
+  # usage error prints "done" thirteen seconds later and the run reads as a
+  # success -- which is exactly what happened to stereo_midside on the first
+  # launch, and would have been found only by noticing a missing CSV.
+  local rc=${PIPESTATUS[0]}
+  if [ "$rc" -ne 0 ]; then
+    echo "== $name: FAILED (exit $rc) $(date '+%H:%M:%S') -- see $OUT/$name.txt"
+    rm -f "$OUT/$name.csv"          # never leave a partial CSV to be skipped
+    return "$rc"
+  fi
   echo "== $name: done $(date '+%H:%M:%S')"
 }
 
@@ -52,7 +62,9 @@ run_once stereo         --sweep stereo=off,on
 # mid/side DELETES the side channel on purpose; the rebuild puts an image
 # back. Stacked, they are pulling opposite directions, and B1 already found
 # mid/side at exponent 4 net-harmful on its own. Four configs, one run.
-run_once stereo_midside --sweep midside=off,on stereo=off,on
+# One --sweep per axis: the flag is action="append", so a second key=values
+# passed bare is a positional and argparse rejects the whole invocation.
+run_once stereo_midside --sweep midside=off,on --sweep stereo=off,on
 
 # --- expected-negative -----------------------------------------------------
 # No side channel exists in these clips (S/M <= -44 dB), so the rebuild has
