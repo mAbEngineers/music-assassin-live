@@ -15,7 +15,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from assassin_live.audio.backends.pipewire import diagnose_capture  # noqa: E402
+from assassin_live.audio.backends.pipewire import (  # noqa: E402
+    diagnose_capture, our_stream_nodes)
 
 TRAP = "MusicAssassin"
 REAL = "bluez_output.37_22_C9_82_4F_52.1"
@@ -45,7 +46,17 @@ def node(nid: int, name: str, media_class: str | None = None,
 
 def client(cid: int, pid: int) -> dict:
     return {"id": cid, "type": "PipeWire:Interface:Client",
-            "info": {"props": {"pipewire.sec.pid": pid}}}
+            "info": {"props": {"pipewire.sec.pid": pid,
+                               "application.process.id": pid}}}
+
+
+def pulse_proxied(cid: int, app_pid: int, daemon_pid: int = 2122) -> dict:
+    """A client as pipewire-pulse actually reports it: sec.pid is the
+    daemon's, the app's own pid is in application.process.id."""
+    return {"id": cid, "type": "PipeWire:Interface:Client",
+            "info": {"props": {"pipewire.sec.pid": daemon_pid,
+                               "client.api": "pipewire-pulse",
+                               "application.process.id": app_pid}}}
 
 
 def link(out_node: int, in_node: int) -> dict:
@@ -134,6 +145,37 @@ def test_other_processes_are_not_ours():
           diagnose_capture(objs, OURS, TRAP, REAL) is None)
 
 
+def test_pulse_proxied_clients_are_still_ours():
+    """The failure that made every check below silently vacuous until
+    2026-08-18: PortAudio's "pulse" device connects through pipewire-pulse,
+    which proxies the socket, so `pipewire.sec.pid` on our client is the
+    *daemon's* pid. Measured on a real graph, Firefox, GNOME's volume
+    control and our own streams all reported the same 2122. Matching on it
+    finds nothing, forever, and a detector that finds nothing reports no
+    faults — indistinguishable from working."""
+    print("\npulse-proxied identity (the silent-vacuum bug)")
+    DAEMON = 2122
+    objs = [pulse_proxied(CLIENT_US, OURS, DAEMON),
+            node(REAL_NODE, REAL, "Audio/Sink"),
+            node(TRAP_NODE, TRAP, "Audio/Sink"),
+            # the node carries application.process.id too, which is why the
+            # client indirection is not even strictly needed
+            {"id": CAP, "type": "PipeWire:Interface:Node",
+             "info": {"props": {"node.name": "ALSA plug-in [music-assassin-live]",
+                                "media.class": "Stream/Input/Audio",
+                                "client.id": CLIENT_US,
+                                "application.process.id": OURS}}},
+            link(REAL_NODE, CAP)]
+
+    mine = our_stream_nodes(objs, OURS)
+    check("our capture node is found despite sec.pid being the daemon's",
+          mine["Stream/Input/Audio"] == {CAP}, str(mine))
+    check("and the loop is therefore detected, not silently missed",
+          diagnose_capture(objs, OURS, TRAP, REAL) == "feedback_loop")
+    check("the daemon's pid does not claim our nodes",
+          our_stream_nodes(objs, DAEMON)["Stream/Input/Audio"] == set())
+
+
 def main() -> int:
     print("capture diagnosis tests (no audio graph required)")
     test_healthy()
@@ -141,6 +183,7 @@ def main() -> int:
     test_hijacked_but_not_looping()
     test_nothing_to_judge_yet()
     test_other_processes_are_not_ours()
+    test_pulse_proxied_clients_are_still_ours()
     print(f"\n{'FAIL' if FAILURES else 'PASS'}"
           + (f" — {len(FAILURES)}: {', '.join(FAILURES)}" if FAILURES else ""))
     return 1 if FAILURES else 0

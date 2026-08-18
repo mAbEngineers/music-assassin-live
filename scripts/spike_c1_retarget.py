@@ -60,11 +60,7 @@ def playback_peer(pid: int) -> str | None:
     objs = pw._pw_dump_all()
     nodes = pw._of_type(objs, ":Node")
     name_by_id = {n["id"]: pw._props(n).get("node.name", "") for n in nodes}
-    ours = {o["id"] for o in pw._of_type(objs, ":Client")
-            if pw._props(o).get("pipewire.sec.pid") == pid}
-    play = {n["id"] for n in nodes
-            if pw._props(n).get("client.id") in ours
-            and pw._props(n).get("media.class") == "Stream/Output/Audio"}
+    play = pw.our_stream_nodes(objs, pid)["Stream/Output/Audio"]
     peers = {name_by_id.get(pw._props(link).get("link.input.node"))
              for link in pw._of_type(objs, ":Link")
              if pw._props(link).get("link.output.node") in play}

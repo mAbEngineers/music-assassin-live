@@ -162,9 +162,42 @@ the case it caused; it does not make the test safe in general.
    flip — or don't flip — the stereo default on what it says. This is the
    only thing standing between the −161 dB image collapse and it being
    fixed for real; the code is written and tested.
-4. Then Phase 2 in the roadmap: **C1** gapless device switching (the
-   originally reported pain point), **C2** volume forwarding, **C4** a
-   human-readable status line. (**C8** is done — see above.)
+4. Then Phase 2 in the roadmap: **C2** volume forwarding, **C4** a
+   human-readable status line, **C3** coherent picker behaviour. (**C1**
+   and **C8** are done — see below.)
+
+## C1 and C8 are done (2026-08-18)
+
+**C1 — gapless output switching, the originally reported pain point.** An
+output change no longer tears the stream down. `AudioEngine.retarget_output()`
+writes `target.object` on the playback node only and WirePlumber relinks it;
+the caller falls back to the old `retarget()` when that returns False. Spiked
+three times on real hardware: link moves in 0.01–0.04 s, worst callback gap
+21.4 ms against a 20 ms block period, zero xruns, callbacks never stop. So
+the multi-second dropout *and* the reset model state are both gone, and the
+gain-ramp rung C1 held in reserve is not needed.
+
+**C8 — the app now checks what it is capturing**, every ~5 s, and turns off
+immediately on a feedback loop rather than attempting a repair that would
+spend 3 s howling. `check()` also distinguishes "the trap is gone" from
+"something stole the default", which it used to conflate.
+
+**Read this before touching PipeWire node lookup.** Both features nearly
+shipped broken for the same reason, found only by running the C1 spike:
+`pipewire.sec.pid` is *not* the application's pid. Anything arriving through
+pipewire-pulse — which is how PortAudio's `pulse` device connects — is
+proxied, so the client reports the pipewire-pulse **daemon's** pid; on this
+machine Firefox, GNOME's volume control and our own streams all reported
+2122. `pin_stream()` had therefore been finding nothing and returning False
+on every start since it was written, and C8's detector inherited the same
+matching and was silently vacuous — it would never have fired on the incident
+it was written for. Use `our_stream_nodes()` / `_owner_pid()`
+(`application.process.id`, falling back to `pipewire.sec.pid` for native
+clients). Regression test: `tests/test_capture_diagnosis.py`.
+
+Worth checking on your own machine: the engine prints "warning: could not pin
+audio streams to their targets" whenever that second pass fails. If you have
+been seeing it, this was why.
 
 The **stereo processor contract** that previous handovers flagged as buried
 inside A1 is no longer a blocker: `wants_stereo` landed 2026-08-18, so A1 can

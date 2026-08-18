@@ -71,6 +71,47 @@ def _of_type(objs: list[dict], suffix: str) -> list[dict]:
     return [o for o in objs if o.get("type", "").endswith(suffix)]
 
 
+def _owner_pid(props: dict):
+    """The pid of the application a client/node belongs to.
+
+    NOT `pipewire.sec.pid`, which is the pid of whatever opened the socket.
+    Anything arriving through pipewire-pulse (`client.api ==
+    'pipewire-pulse'`, which is how PortAudio's "pulse" device and the ALSA
+    plugin both connect) is proxied by the pipewire-pulse daemon, so every
+    such client reports the *daemon's* pid — measured on this machine:
+    Firefox, GNOME's volume control, our own streams and a dozen others all
+    reporting the same 2122. Matching on it finds nothing, forever, silently.
+
+    `application.process.id` is the application's own pid and is carried on
+    both the client and the node. `pipewire.sec.pid` stays as the fallback
+    for native protocol clients, where it is genuine.
+    """
+    pid = props.get("application.process.id")
+    return pid if pid is not None else props.get("pipewire.sec.pid")
+
+
+def our_stream_nodes(objs: list[dict], pid: int) -> dict[str, set]:
+    """This process's own stream nodes, keyed by media.class.
+
+    Checks the node's own props first — `application.process.id` is on the
+    node, so the client indirection is not even needed — and still accepts
+    nodes reached via a client that identifies as ours, so a platform that
+    only labels the client keeps working.
+    """
+    ours = {o["id"] for o in _of_type(objs, ":Client")
+            if _owner_pid(_props(o)) == pid}
+    found: dict[str, set] = {"Stream/Input/Audio": set(),
+                             "Stream/Output/Audio": set()}
+    for node in _of_type(objs, ":Node"):
+        props = _props(node)
+        cls = props.get("media.class")
+        if cls not in found:
+            continue
+        if _owner_pid(props) == pid or props.get("client.id") in ours:
+            found[cls].add(node["id"])
+    return found
+
+
 def diagnose_capture(objs: list[dict], pid: int, trap_name: str,
                      playback_name: str | None) -> str | None:
     """What is this process's capture stream actually connected to?
@@ -103,11 +144,7 @@ def diagnose_capture(objs: list[dict], pid: int, trap_name: str,
     if trap_name not in name_by_id.values():
         return "trap_lost"
 
-    ours = {o["id"] for o in _of_type(objs, ":Client")
-            if _props(o).get("pipewire.sec.pid") == pid}
-    capture_ids = {n["id"] for n in nodes
-                   if _props(n).get("client.id") in ours
-                   and _props(n).get("media.class") == "Stream/Input/Audio"}
+    capture_ids = our_stream_nodes(objs, pid)["Stream/Input/Audio"]
     if not capture_ids:
         return None      # stream not open yet — nothing to judge
 
@@ -206,25 +243,18 @@ def pin_process_streams(pid: int, capture_sink: str | None, playback_sink: str,
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        # One snapshot: nodes and clients read separately are two different
+        # moments, and a stream that appears between them is invisible.
+        objs = _pw_dump_all()
         wanted = {playback_sink} | ({capture_sink} if capture_sink else set())
         serials = {}
-        for node in _pw_dump_nodes():
-            props = node.get("info", {}).get("props", {})
+        for node in _of_type(objs, ":Node"):
+            props = _props(node)
             if props.get("node.name") in wanted:
                 serials[props["node.name"]] = props.get("object.serial")
-        our_clients = {
-            o["id"] for o in _pw_dump(":Client")
-            if o.get("info", {}).get("props", {}).get("pipewire.sec.pid") == pid
-        }
-        cap_node = play_node = None
-        for node in _pw_dump_nodes():
-            props = node.get("info", {}).get("props", {})
-            if props.get("client.id") not in our_clients:
-                continue
-            if props.get("media.class") == "Stream/Input/Audio":
-                cap_node = node["id"]
-            elif props.get("media.class") == "Stream/Output/Audio":
-                play_node = node["id"]
+        mine = our_stream_nodes(objs, pid)
+        cap_node = next(iter(mine["Stream/Input/Audio"]), None)
+        play_node = next(iter(mine["Stream/Output/Audio"]), None)
         targets = [(play_node, playback_sink)]
         if capture_sink is not None:
             targets.append((cap_node, capture_sink))

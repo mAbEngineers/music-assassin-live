@@ -774,7 +774,7 @@ A1 produces a working separator, not before.
 
 This is where the app currently feels like a prototype rather than a product.
 
-### C1. Gapless output-device switching — built 2026-08-18, spike not yet run
+### C1. Gapless output-device switching ✅ done 2026-08-18, spike run and green
 
 Today, changing output device — from the app's dropdown *or* from the system
 audio picker — calls `AudioEngine.retarget()`, which is `stop()` + `start()`:
@@ -829,16 +829,56 @@ returned True while resetting the model would pass a naive test and still be
 the bug. Every failure mode (backend says no, backend raises, backend
 predates C1, stream already dead, no backend) falls back rather than breaking.
 
-**What no test can answer, and the spike must:** whether WirePlumber honours
-a target change on a stream that is *already linked and playing*. That is a
-property of the running system. `scripts/spike_c1_retarget.py` creates two
-null sinks of its own, plays silence into one, moves the live stream to the
-other, and reports whether the link moved, how long it took, whether the
-callback kept firing, and the worst callback gap. It destroys only the node
-ids it created — never a sweep by name, which is precisely how C8's incident
-happened. If the link moves but the worst gap is far over one block period,
-routing is seamless while audio is not, and C1's next rung (ramp wet to 0
-across the switch) is still needed.
+**Spike run 2026-08-18, three times, and it works** —
+`scripts/spike_c1_retarget.py` (two null sinks of its own, silence, a live
+move; it destroys only the node ids it created, never a sweep by name, which
+is precisely how C8's incident happened):
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| link moved | ✅ 0.01 s | ✅ 0.01 s | ✅ 0.04 s |
+| stream stayed active | ✅ | ✅ | ✅ |
+| callbacks during the move | 18 (≈16 expected) | 17 (≈16) | 23 (≈22) |
+| worst callback gap | 21.4 ms | 21.4 ms | 21.5 ms |
+| PortAudio status flags | 0 | 0 | 0 |
+
+Against a 20.0 ms block period, a worst gap of 21.4 ms is ~1.5 ms of jitter —
+under one block, with no dropped callbacks and no xruns. **So the move is
+gapless in audio, not just in routing, and C1's next rung (ramping wet to 0
+across the switch) is not needed.** The multi-second dropout and the reset
+model are both simply gone for this case.
+
+**The spike also found a live bug in shipped code, which is the whole reason
+for running one.** The first attempt could not pin the stream at all.
+`pin_process_streams()` identified our nodes by `pipewire.sec.pid`, which is
+the pid of whatever *opened the socket* — and anything arriving through
+pipewire-pulse (which is how PortAudio's `pulse` device connects) is proxied
+by the pipewire-pulse daemon, so the client reports the *daemon's* pid.
+Measured on a real graph: Firefox, GNOME's volume control, our own streams
+and a dozen others all reporting the same pid 2122. So `pin_stream()`'s
+second targeting pass has been finding nothing and returning False on this
+machine — the engine's "could not pin audio streams to their targets" warning
+fires on every start, and routing has been resting on the `PULSE_SINK` env
+vars alone.
+
+Worse, **C8's detector inherited the same matching and was silently
+vacuous**: no capture node found means no fault reported, which is
+indistinguishable from working. It would never have fired on the very
+incident it was written for. Fixed in one place — `_owner_pid()` prefers
+`application.process.id` (the application's own pid, carried on both client
+and node) and keeps `pipewire.sec.pid` as the fallback for native protocol
+clients where it is genuine — and `our_stream_nodes()` is now the single
+place all three callers ask "which nodes are mine". Regression-tested in
+`tests/test_capture_diagnosis.py` with a fixture shaped like a real
+pulse-proxied client.
+
+**Follow-up worth doing, not done here:** now that the metadata pass
+demonstrably works, the `PULSE_SINK`/`sd._terminate()/_initialize()`
+machinery in `resolve_stream_devices()` may be the dead weight this section
+predicted. It governs *initial* device selection rather than moves, so it is
+a separate change with its own risk; the test is to null out the env vars and
+confirm a freshly-opened stream still lands correctly on the strength of
+`pin_stream()` alone.
 
 ### C2. Forward volume keys to the real sink
 
@@ -1166,8 +1206,11 @@ entry ticket to a Windows APO later. Not near-term.
 
 ### Phase 2 — Make it feel like a product (1–2 weeks)
 
-11. **C1 — gapless output switching.** The named pain point. Start with the
-    live-`pw-metadata`-retarget spike.
+11. ~~**C1 — gapless output switching.**~~ Done 2026-08-18. The spike
+    confirmed a live `target.object` write moves the stream in ~0.01 s with
+    ~1.5 ms of callback jitter and no xruns, so the teardown path is gone
+    for output changes. It also exposed the `pipewire.sec.pid` matching bug
+    that had quietly disabled `pin_stream()` (and C8's detector). See C1.
 12. **C2 — volume-key forwarding.** Promoted: it is now a suspected
     measurement confound, not only a UX wart (see C2).
 13. ~~**A6 — report input RMS in `bench_offline()`.**~~ Done 2026-08-15 —
