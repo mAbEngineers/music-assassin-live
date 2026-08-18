@@ -24,7 +24,11 @@ set -u
 
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$PWD/.venv/bin/python -u"
-OUT="$HOME/.local/state/music-assassin/bench/b3"
+# Both overridable so the sweep can run on a machine that reaches the corpus
+# over a mount rather than holding it locally -- see WHERE in the NOTES, and
+# read the RTF caveat there before comparing those numbers to B1's.
+OUT="${OUT:-$HOME/.local/state/music-assassin/bench/b3}"
+CORPUS="${CORPUS:-$HOME/.local/state/music-assassin/bench/corpus}"
 mkdir -p "$OUT"
 
 run_once () {  # run_once <name> <args...>
@@ -34,7 +38,8 @@ run_once () {  # run_once <name> <args...>
     return 0
   fi
   echo "== $name: starting $(date '+%H:%M:%S')"
-  $PY tests/bench_quality.py "$@" --csv "$OUT/$name.csv" 2>&1 | tee "$OUT/$name.txt"
+  $PY tests/bench_quality.py "$@" --corpus "$CORPUS" \
+      --csv "$OUT/$name.csv" 2>&1 | tee "$OUT/$name.txt"
   echo "== $name: done $(date '+%H:%M:%S')"
 }
 
@@ -64,10 +69,17 @@ run_once male_ears      --only-category male_lead --sweep stereo=off,on \
 echo "######## B3 SWEEP COMPLETE $(date '+%F %H:%M:%S') ########"
 
 # NOTES
-#   WHERE: on the box that holds the corpus (~/.local/state/music-assassin/
-#   bench/corpus). It is not on every machine this repo is edited from, and
-#   the sweep reads every clip many times -- over a network mount that alone
-#   would dominate the runtime.
+#   WHERE: preferably on the box that holds the corpus (~/.local/state/
+#   music-assassin/bench/corpus). CORPUS= and OUT= let it run elsewhere and
+#   read the clips over a mount, which is fine for the quality metrics.
+#
+#   BUT THE RTF COLUMN IS THEN NOT COMPARABLE TO B1's. Every ms-per-block
+#   and RTF number is a property of the machine that produced it, and B1's
+#   came from the corpus box. Within one B3 run the stereo=off vs stereo=on
+#   delta is still valid -- both arms ran on the same hardware, which is the
+#   comparison this sweep exists to make -- but "RTF still inside budget"
+#   is only a verdict about the machine it ran on. Re-check that one number
+#   on the target hardware before flipping the default on it.
 #
 #   launch:   mkdir -p ~/.local/state/music-assassin/bench/b3
 #             setsid nohup bash scripts/run_b3_sweep.sh \
