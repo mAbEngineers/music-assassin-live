@@ -7,299 +7,227 @@ measured findings and the list of dead ends all live in
 
 ## Where the code is
 
-**Merged to `main` on 2026-08-15.** Five of the six branches are in; `main` is
-at version 0.1.4 and green on the full offline suite (engine recovery, all five
-processors, routing dry, imports). **Nothing has been pushed. The 0.1.4 tag is
-deliberately not cut yet** — see next actions.
+**Nothing is pushed, and the 0.1.4 tag is still not cut.**
 
-| Branch | What it is | State |
+| Branch | Contents | State |
 |---|---|---|
-| `fix/stream-recovery` | 0.1.4 — `stream_ok`, callback crash containment, soft limiter, 300 % wet boost, `tests/test_engine_recovery.py` | merged (`42fe75d`) |
-| `feature/quality-harness` | `tests/bench_quality.py` — the quality measurement harness | merged (`42fe75d`) |
-| `fix/e2e-alignment` | `test_live_e2e.py` cross-correlation alignment + engine health counters | merged (`42fe75d`) |
-| `refactor/routing-backend` | `RoutingBackend` seam; engine decoupled from PipeWire | merged (`92aeb0a`) |
-| `fix/dpdfnet-norm-init` | seeds DPDFNet state from ONNX metadata | merged (`9877b0c`) — **read ROADMAP §2.2/§2.3** |
-| `docs/roadmap` | `docs/ROADMAP.md` | merged (`01f6acb`) |
-| `feature/windows-packaging` | installer scaffolding | **not merged** — app can't run on Windows yet (D3) |
+| `main` | 0.1.4, green on the offline suite | at `8df4f83` |
+| `feature/stereo-output` | B3 stereo rebuild, `wants_stereo`, C1, C2, C3, C4, C7, C8, E1 | **14 commits, unpushed** |
+| `feat/separator-spike` | A1 spike (measurement only, no processor yet) | 1 commit, off the above |
+| `feature/windows-packaging` | installer scaffolding | not merged — app can't run on Windows (D3) |
 
-The pre-merge state is tagged `pre-merge-backup-20260815` (`06f0ac8`) if any of
-this needs to be unwound.
+Pushing needs to happen from a machine with credentials — this session had
+none (`gh` installed but not logged in, no credential helper):
 
-## The two things to read before touching model quality
+```
+git push -u origin feature/stereo-output
+git push -u origin feat/separator-spike
+```
 
-**ROADMAP §2.2/§2.3 — `dpdfnet_hr`'s ONNX norm-init fix.** Its old −30 dB music
-suppression was an artifact of a real defect (discarded ONNX normalization
-metadata → mis-seeded internal normalizer → output depended on input level by
-~36 dB), now fixed. Every previously-recorded suppression figure for this
-model from before 2026-08-14 is invalidated.
+That first push is also the **first exercise of the new CI workflow**
+(`.github/workflows/tests.yml`). Expect a possible iteration on the apt/pip
+step; it has never run.
 
-**ROADMAP §5 B1 — the model + mid/side comparison, done 2026-08-17.** Run
-against the real 57-clip stereo corpus (§3.1, see below), 104 item-ratio pairs.
-Headline results:
+## What gates the 0.1.4 tag — three things, all needing a human
 
-| model | net dSI-SDR | vocal damage | notes |
+**1. The app has never been launched with any of this.** Fourteen commits
+changed the engine, the routing backend and the UI. Eight test files cover the
+logic offline and two spikes verified mechanisms against a real PipeWire
+graph, but the actual application has not been run once: `_switch_output`,
+`_check_capture`, `_say`, `sync_volume`/`adopt_volume`, the status line, the
+details toggle. Smoke checklist:
+
+| check | expected |
+|---|---|
+| toggle ON | `Filtering → <device> · ~50 ms · healthy` |
+| `details ▸` | counters appear/disappear |
+| change output in the app | no multi-second dropout |
+| change output in GNOME | dropdown follows in ~0.25 s, status says `output → X` |
+| volume keys | audio level changes; slider stays where you put it |
+| on launch | **no** `could not pin audio streams to their targets` warning |
+
+That last line is the direct test of the pid fix below. If it still warns,
+`pin_stream()` is still dead and C1/C8 rest on nothing.
+
+**2. By-ear: which model.** B1's numbers rank candidates; they do not settle
+quality, and the harness says so itself.
+
+```
+B=~/.local/state/music-assassin/bench/b1 SECS=12 scripts/ab_listen.sh male a200
+```
+
+Blind by default. The trap is specific: `dtln` beats `dpdfnet_hr` on
+`male_lead` dSI-SDR (+1.07 vs +0.33) while removing **28 dB less music**
+(−20.0 vs −48.4). SI-SDR may simply not be scoring what this app is for.
+
+**3. By-ear: does the stereo rebuild bring music back.**
+
+```
+B=~/.local/state/music-assassin/bench/b3 scripts/ab_listen.sh sparse a200 --sighted
+```
+
+Sighted, because this compares one model against itself with one flag flipped.
+**This is the question the numbers cannot answer** — see below.
+
+## The stereo work (B3) — built, measured, still shipped OFF
+
+`assassin_live/audio/stereo.py` rebuilds the image by recovering the chain's
+implied spectral mask from the audio (`|Wet| / |Dry_mono|` per bin) and
+applying that one mask to both original channels. No processor changes, so all
+four models get it at once. Full B3 sweep, whole corpus, 104 item-ratio pairs:
+
+| config | music_supp | vocal_ret | dSI-SDR | stereo_width |
+|---|---|---|---|---|
+| `dpdfnet_hr` | −46.13 | −4.96 | **+4.19** | −160.93 |
+| `dpdfnet_hr+st` | −46.13 | −4.96 | **+4.19** | **−6.14** |
+| `dpdfnet_hr+ms4` | −50.52 | −7.41 | +3.23 | −160.93 |
+| `dpdfnet_hr+ms4+st` | −50.52 | −7.41 | +3.23 | −8.17 |
+
+Per category, stereo off → on: `sparse_acoustic` −161.5 → **−1.99 dB**,
+`male_lead` −163.0 → −10.6 dB. The `stereo-collapse` failure tag goes
+104/104 → 4/104. RTF +0.0065, latency +5.3 ms. Orthogonal to mid/side, which
+keeps its own B1 penalty either way.
+
+**Read the identical columns correctly.** Every mono metric is unchanged *by
+construction*, not by luck: one mask applied to both channels leaves the mono
+downmix arithmetically the same signal. The music that returns lives only in
+the side channel, and **nothing in that table measures the side channel**
+except `stereo_width_db`, which counts its energy without caring whether it is
+voice or a guitar. So the sweep says "free as far as the harness can see", and
+the harness is structurally blind to the one cost this change could have.
+Hence gate 3 above. Off by default until someone listens; the
+"Preserve Stereo Image" toggle is in the UI and persisted.
+
+## Two retractions and one hole — read before trusting older claims
+
+**`pipewire.sec.pid` is not the application's pid.** Anything arriving through
+pipewire-pulse (how PortAudio's `pulse` device connects) is proxied, so the
+client reports the *daemon's* pid — on this machine Firefox, GNOME's volume
+control and our own streams all reported 2122. `pin_stream()` had therefore
+been finding nothing and returning False **since it was written**, and C8's
+capture detector inherited the same lookup and was silently vacuous — it would
+never have fired on the incident it was written for. Use `our_stream_nodes()` /
+`_owner_pid()` (`application.process.id`, falling back to `pipewire.sec.pid`
+for native clients). Found only by running the C1 spike.
+
+**A sink's volume does not scale its monitor.** C2 was promoted from a UX wart
+to a *measurement confound* on the belief that the volume slider was changing
+what the model is fed. Measured: a tone captured from a monitor is identical at
+sink volume 1.0 and 0.5, **ratio 1.000**. The keys were inert, not corrupting.
+The mirror still shipped (they work now), but —
+
+**E2's `noise_only` swing of −55.7 → −21.7 dB across two identical hardware
+runs has lost its only explanation and is now unaccounted for.** 34 dB of
+run-to-run variance with no candidate. Do not treat that tier's absolute
+numbers as reproducible.
+
+## A1 (Phase 3) — spiked, and the framing was wrong
+
+A1 is written around "RTF 0.067, ~15× headroom". Real, but measured on a 60 s
+buffer. Against chunk size (1 thread, `scripts/spike_a1_separator.py`):
+
+| chunk | ms/call | RTF | headroom |
 |---|---|---|---|
-| `dpdfnet_hr` | **+4.19 dB (best)** | −5.0 dB (worst) | stays the pragmatic default — best net, at the cost of the most vocal damage |
-| `dtln` | +3.59 dB | **−0.9 dB (best)** | ~4× faster; the strongest by-ear candidate against the default |
-| `gtcrn` | +2.64 dB | −2.3 dB | its "improved" musical-noise score is likely a hollowed-spectrum artifact, not real |
-| `dpdfnet` (16 kHz) | **−0.28 dB (net harmful)** | −3.1 dB | worse than doing nothing on this corpus; don't recommend it |
+| 0.25 s | 153.3 | 0.613 | 1.6× |
+| 1.00 s | 129.0 | 0.129 | 7.8× |
+| 8.00 s | 205.1 | 0.026 | 39.0× |
 
-**Mid/side at the shipped exponent (4), stacked with `dpdfnet_hr`, should
-*not* be flipped on** — it deepens suppression 4.4 dB but net SI-SDR drops
-(4.19 → 3.23) and vocal-loss frames nearly double (36/104 → 60/104). The
-opposite of the hoped-for outcome. Keep it off; a lower exponent is the more
-promising next experiment (ROADMAP B2), not exposed as a default yet.
+**Cost per call is flat.** It is fixed overhead, not work proportional to the
+audio, so RTF improves only because the denominator grows. Latency is the
+binding constraint and RTF is nearly irrelevant. Practical floor ≈ 1 s chunks
+→ **≥1.1 s end-to-end**, so this can only ever be an additional high-latency
+mode; the ~50 ms path is unreachable with it. That answers **Q3 by force**.
 
-**Also newly measured, universal: stereo width collapses to −161 dB on every
-single one of 104 pairs, every model, mid/side on or off.** Not occasional —
-every time the filter runs, the output goes fully mono. **Fixed in code
-2026-08-18 but shipped OFF** — see "The stereo work" below.
+Also: peak RSS 478 MB; every call emits a startup transient (~26 samples
+reaching |466| against a p99.99 of 0.6) that a chunked wrapper must trim or it
+clicks once per chunk; output is shorter than input (44100 → 44032); stems[0]
+is vocals, [1] accompaniment, confirmed by cross-correlation.
 
-**Sharper finding, category breakdown (`male_lead`, 8 clips — added
-specifically to test the 2026-07-24 "cuts girl vocals" complaint from the
-other direction).** `dpdfnet_hr`'s net advantage nearly disappears on male
-leads specifically: dSI-SDR +4.19 dB whole-corpus → **+0.33 dB** on this
-category, with its worst vocal damage anywhere (−8.5 dB). `dtln` and `gtcrn`
-both net-beat it here. On `sparse_acoustic` the opposite holds — `dpdfnet_hr`
-pulls far ahead (+9.39 dB, 8× the others). Its advantage is concentrated in
-sparse/quiet content, not uniform. Not a resolution of the original
-female-vocal complaint (adjacent question, different vocals) but the single
-most actionable lead from this session.
+**No quality curve yet, deliberately.** An ad-hoc probe gave nonsense (both
+stems below the mixture) and the cause was the probe — linear-interp
+resampling and single-lag alignment, exactly what `estimate_lag`'s docstring
+warns about. The curve comes from writing the `StreamProcessor` and sweeping
+it through `bench_quality.py`, which already solves alignment carefully.
 
-**One unresolved anomaly, flagged rather than papered over:** on
-`dual_mono_control` (n=4, expected-null — no real side channel), turning
-mid/side on makes vocal retention *worse* (−15.3 → −20.8 dB) while aggregate
-dSI-SDR simultaneously *improves* (−2.58 → +0.85 dB). Something in the metric
-or mix path behaves oddly at very low side-channel energy. Not root-caused —
-don't build on this category's numbers yet.
+Next step for A1: `SpleeterProcessor` (`wants_stereo=True`, chunked, transient
+trimmed, remainder carried), registered as `spleeter_<chunk>ms` variants so
+`--sweep model=...` produces the curve. sherpa-onnx is **not** in the app venv
+and should not be added to `requirements.txt`; use
+`~/Documents/venvs/assassin_venv_v0.4.4_cpu/bin/python`, which has 1.13.4.
+Models: `Music-Assassin/models/sherpa_onnx/sherpa-onnx-spleeter-2stems-int8/`
+(2 × 26 MB) — note the `sherpa_onnx/` path component.
 
-**By-ear audio exists — for `male_lead` and `sparse_acoustic` — but nobody has
-listened yet.** `~/.local/state/music-assassin/bench/b1/audio_{male,sparse}/`,
-covering input/oracle/ceiling/`dpdfnet_hr`/`gtcrn`/`dtln` at two ratios each.
-Not yet rendered for the full corpus or for `dtln` vs `dpdfnet_hr` head-to-head
-outside those two categories. Priority listen: `male_lead` — that's where the
-numbers disagree most with the standing default.
+## What else landed 2026-08-18
 
-## The stereo work (2026-08-18) — built, not yet switched on
-
-**`assassin_live/audio/stereo.py`** rebuilds the stereo image around the
-mono enhancers instead of writing the processed signal to both channels. It
-recovers the chain's implied spectral mask from the audio itself
-(`|Wet| / |Dry_mono|` per bin) and applies that one mask to both original
-channels, so panning is preserved exactly while the model's per-band
-suppression still lands. No processor changes — it works for all four shipped
-models at once. Full reasoning, including why the cheaper side-re-injection
-option was rejected (it hands back the music the model just removed), is in
-ROADMAP B3.
-
-**`StreamProcessor.wants_stereo`** landed with it — the A1 prerequisite the
-previous handover flagged as blocking three items and needing input from
-nobody. A processor that sets it gets `(n, 2)` and returns `(n, 2)`; the
-engine skips both the downmix and the rebuild and builds 2-channel
-resamplers. Nothing shipped sets it; Spleeter will.
-
-**It is OFF by default (`AudioEngine.set_stereo`).** It changes what every
-pipeline sends to the speakers, and §2.2 records what flipping a default on
-an expectation cost last time. The trade is real: width that survives is
-width in bands the model kept, so music sitting in those bands comes back
-too.
-
-**What remains is measurement, not code.** `scripts/run_b3_sweep.sh` —
-whole-corpus `stereo=off,on`, the mid/side interaction, the
-`dual_mono_control` expected-null, and `--dump-audio` for the by-ear pass.
-Flip the default if `stereo_width_db` climbs substantially with
-`music_supp_db` and `delta_si_sdr_db` essentially unmoved and RTF still in
-budget. If suppression drops materially, ship mono and say so in the UI.
-
-Verified without models or hardware (`tests/test_stereo_rebuild.py`, all
-green): unity mask reconstructs the dry pair to 1.8e−07, a fully-suppressing
-chain invents no width, a killed hard-panned band does not leak back, chunk
-size does not change the samples, and end-to-end through `AudioEngine` the
-default still measures the mono collapse (−235 dB) while `set_stereo(True)`
-restores the surviving image. A synthetic-corpus `evaluate()` run moves
-`stereo_width_db` −165.7 → −5.2 dB, clears the `stereo-collapse` tag, and
-leaves every separation metric bit-identical.
-
-## An incident worth reading before running the test suite
-
-`tests/test_routing_dry.py` is named "dry" but **manipulates the live
-PipeWire graph**, and its cleanup step will delete a *running* instance's
-trap sink, judging it stale. That happened on 2026-08-18. PipeWire then
-re-attached the app's orphaned capture stream to the real output sink's
-monitor — which the app also plays into — producing an audio feedback loop
-that ran until the app was killed. `stream_ok` stayed true throughout: the
-stream was alive and healthy, just wired to the wrong thing.
-
-**Both follow-ups are fixed as of 2026-08-18 (ROADMAP C8).** The app now
-verifies *what* it is capturing every ~5 s, not just that the stream lives:
-`diagnose_capture()` reports `trap_lost`, `feedback_loop` (capturing the
-monitor of the sink we play into) or `capture_hijacked`, and the UI turns off
-on a loop immediately rather than attempting a repair that would spend 3 s
-howling. `check()` also now tells "the trap is gone" apart from "something
-stole the default" — it used to conflate them and call `set_default()` on a
-destroyed node id once a second, forever, while reporting healthy. And
-`test_routing_dry.py` refuses to run when it finds a live instance
-(`ALLOW_LIVE=1` overrides).
-
-Still true, and worth keeping in mind: **that test is not hardware-free** and
-should not be run casually just because it sits in `tests/`. The guard covers
-the case it caused; it does not make the test safe in general.
-
-## Immediate next actions
-
-1. **Listen to the rendered audio.** `~/.local/state/music-assassin/bench/b1/audio_male/`
-   first (the male-vocal finding above), then `audio_sparse/`. This is the one
-   thing still gating the 0.1.4 tag — release notes shouldn't quote numbers
-   nobody has heard, especially the surprising ones above. If it confirms the
-   quantitative lead, extend `--dump-audio` to the rest of the corpus and to a
-   direct `dpdfnet_hr` vs `dtln` A/B before deciding anything about the
-   default.
-2. **Cut the 0.1.4 tag and push** once item 1 confirms (or revises) what the
-   release notes should say. The `.deb` is already rebuilt from merged `main`
-   (2026-08-15, binary smoke-tested, `speechdenoiser` correctly excluded for
-   its unresolved license).
-3. **Run `scripts/run_b3_sweep.sh`** (detached, same as the B1 sweep) and
-   flip — or don't flip — the stereo default on what it says. This is the
-   only thing standing between the −161 dB image collapse and it being
-   fixed for real; the code is written and tested.
-4. **Phase 2 is complete** as of 2026-08-18 — C1, C2, C3, C4, C7, C8 and E1
-   all done. Next is Phase 3: **A1**, the separator spike, which the
-   `wants_stereo` seam now unblocks.
-
-   Run the suite with `./scripts/run_tests.sh` (seven hardware-free files,
-   ~10 s; the model benchmark adds ~80 s when the ONNX files are present and
-   is reported as SKIPPED when they are not). CI runs the same script.
-   `test_routing_dry.py` is deliberately not in it — see the incident below.
-
-**One belief was retracted today, and it matters more than the feature that
-retracted it.** C2 was promoted from a UX wart to a *measurement confound* on
-the reasoning that the trap sink being default meant the volume slider was
-scaling what the model is fed — which, given §2.1's ~36 dB level sensitivity,
-would corrupt every hardware-tier number. Measured directly
-(`scripts/spike_c2_monitor_volume.py`): a tone captured from a sink's monitor
-is **identical** at sink volume 1.0 and 0.5, ratio 1.000. Monitors are
-pre-volume. The keys were never corrupting the capture — they were doing
-nothing at all, because the trap's output goes nowhere.
-
-So the volume mirror still shipped (the keys work now, and the slider keeps
-showing the level you chose rather than being pinned to 100%), but **E2's
-`noise_only` swing of −55.7 → −21.7 dB across two identical hardware runs has
-lost its only explanation and is now unaccounted for.** Do not treat that
-tier's absolute numbers as reproducible.
-
-## C1 and C8 are done (2026-08-18)
-
-**C1 — gapless output switching, the originally reported pain point.** An
-output change no longer tears the stream down. `AudioEngine.retarget_output()`
-writes `target.object` on the playback node only and WirePlumber relinks it;
-the caller falls back to the old `retarget()` when that returns False. Spiked
-three times on real hardware: link moves in 0.01–0.04 s, worst callback gap
-21.4 ms against a 20 ms block period, zero xruns, callbacks never stop. So
-the multi-second dropout *and* the reset model state are both gone, and the
-gain-ramp rung C1 held in reserve is not needed.
-
-**C3 — the app stops fighting the system picker**, mostly as a consequence
-of C1: three of its four problems existed only because a retarget was
-expensive. The debounce is 1.5 s → 0.25 s, the dropdown follows external
-changes instead of showing a stale device, and all three routes into an
-output change (our dropdown, the system picker, a device vanishing) go
-through one path — the app's own dropdown had still been using the *heavy*
-retarget, so picking a device in the app was slower than picking one in the
-system menu. `real_sink_changed` also split in two: a device vanishing is no
-longer mistaken for a user choice, which previously meant a sleeping
-Bluetooth headset would silently overwrite the saved output preference.
-
-**C8 — the app now checks what it is capturing**, every ~5 s, and turns off
-immediately on a feedback loop rather than attempting a repair that would
-spend 3 s howling. `check()` also distinguishes "the trap is gone" from
-"something stole the default", which it used to conflate.
-
-**Read this before touching PipeWire node lookup.** Both features nearly
-shipped broken for the same reason, found only by running the C1 spike:
-`pipewire.sec.pid` is *not* the application's pid. Anything arriving through
-pipewire-pulse — which is how PortAudio's `pulse` device connects — is
-proxied, so the client reports the pipewire-pulse **daemon's** pid; on this
-machine Firefox, GNOME's volume control and our own streams all reported
-2122. `pin_stream()` had therefore been finding nothing and returning False
-on every start since it was written, and C8's detector inherited the same
-matching and was silently vacuous — it would never have fired on the incident
-it was written for. Use `our_stream_nodes()` / `_owner_pid()`
-(`application.process.id`, falling back to `pipewire.sec.pid` for native
-clients). Regression test: `tests/test_capture_diagnosis.py`.
-
-Worth checking on your own machine: the engine prints "warning: could not pin
-audio streams to their targets" whenever that second pass fails. If you have
-been seeing it, this was why.
-
-The **stereo processor contract** that previous handovers flagged as buried
-inside A1 is no longer a blocker: `wants_stereo` landed 2026-08-18, so A1 can
-hand Spleeter a real stereo pair on day one.
+- **C1** live output retarget: a `target.object` write moves a running stream
+  in 0.01–0.04 s with ~1.5 ms of callback jitter and no xruns (spiked 3×). The
+  teardown path is gone for output changes, and the model keeps its state.
+- **C3** the picker: debounce 1.5 s → 0.25 s (its stated reason — "each
+  restart is an audible glitch" — died with C1), dropdown follows external
+  changes, one code path for all three ways an output changes.
+  `real_sink_changed` split from `real_sink_replaced` so a sleeping headset no
+  longer overwrites a saved preference.
+- **C4/C7** status line: `Filtering → device · latency · health`, counters
+  behind a toggle. Latency is **measured** from the lockstep FIFO. Its floor
+  is one block of queue hand-off (~20 ms) even with a zero-latency model —
+  relevant to A1, whose budget starts 20 ms in debt.
+- **C8** capture verification every ~5 s: `trap_lost`, `feedback_loop`,
+  `capture_hijacked`. Turns off immediately on a loop rather than attempting a
+  repair that would spend 3 s howling.
+- **E1** CI: `scripts/run_tests.sh`, one entry point for humans and CI.
+  `test_processors_offline.py` used to print "all passed" with no models
+  installed — a vacuous green; it now says `NOTHING TESTED` and exits
+  non-zero, and the runner reports it as SKIPPED.
 
 ## Open questions for the user
 
-Listed in full as ROADMAP §10. The ones that block work right now:
+Full list in ROADMAP §10. Live ones:
 
-- **Latency ceiling** — hard product constraint for the separator work (A1);
-  ~50–70 ms and ~500 ms lead to different designs. Gates A1's *conclusion*,
-  not its start — the spike's own job is to produce the latency-vs-quality
-  curve that answers this, not to be handed the answer up front.
-- **Mono output while filtering** (Q5) — mostly overtaken by events: the fix
-  cost one module and no processor changes, so "is it worth engineering
-  around" no longer needs an answer, and the sweep decides the rest. The one
-  judgement left: if the trade turns out bad, is shipping mono *with the UI
-  saying so* acceptable?
-- **Wide-stereo corpus material** — the corpus can prove the rebuild works
-  but not that it fails gracefully (median S/M −8.2 dB, nothing hard-panned
-  or out-of-phase). ~6–10 clips would close it; `bench_quality.py` already
-  reserves the category name `stereo_torture`. Shopping list in ROADMAP
-  §3.1.
-
-## What got resolved this session (2026-08-16/17)
-
-- **Stereo corpus**: built and used. 57 real clips (`~/Music/MusicAssassin/Corpus/`),
-  8 categories, structurally verified before separation. A 2026-08-15 attempt
-  from `~/Music/Acapella/` failed outright — that folder is 100% vocal-only,
-  don't retry it. A second methodology bug (the excerpt window-picker biasing
-  toward the loudest/chorus moment, understating how low male vocals in this
-  material actually go) was caught and fixed before it could bias results —
-  see ROADMAP §3.1 for the full story, including why `male_lead`/`rap`/
-  `sparse_acoustic`/`orchestral_dialogue` were added (the original 39 files
-  were 100% female vocal, median F0 331 Hz).
-- **B1**: run to completion, real findings above.
+- **Q3 latency ceiling** — effectively answered by the A1 spike: a separator
+  costs ≥1.1 s. The remaining question is a product one: ship it as a
+  high-latency mode, or not at all?
+- **Q5 mono output** — the engineering half is settled (the fix cost one
+  module). What is left: if the by-ear pass finds the restored side channel
+  brings back audible music, is shipping mono *and saying so in the UI*
+  acceptable?
+- **Wide-stereo corpus** — ~6–10 hard-panned / EDM / out-of-phase / binaural
+  clips. The corpus proves the rebuild works but cannot show it failing
+  gracefully (median S/M −8.2 dB, nothing hard-panned).
+  `bench_quality.py` already reserves the category name `stereo_torture`.
+- **Q1** (blocks B4) and **Q2** (blocks C5) unchanged.
 
 ## Environment notes
 
-- Python: `.venv/bin/python` in the repo root. Models live in
-  `~/.local/share/music-assassin/models/`.
-- Corpus and sweep outputs live under `~/.local/state/music-assassin/bench/`
-  (`corpus/` for the built stems, `b1/` for this session's sweep CSVs/logs,
-  `quality/latest.json` for the harness's own diff-vs-previous state).
-- `scripts/run_b1_sweep.sh` is what actually produced §5 B1's numbers — one
-  `bench_quality.py` invocation per model rather than one combined `--sweep`,
-  because the harness only prints its comparison table once the whole
-  invocation finishes, and a combined run took ~7 h with nothing on disk until
-  it did. Detached the same way as corpus builds; reruns skip whatever already
-  has a CSV. `speechdenoiser` is deliberately excluded from it — its license
-  is unresolved, so it can't be the shipped default no matter how it scores.
+- Run the suite with `./scripts/run_tests.sh` — seven hardware-free files
+  (~10 s), plus the model benchmark (~80 s) when the ONNX files are present.
+- **`tests/test_routing_dry.py` is not hardware-free** despite its name and is
+  deliberately excluded from the runner. It destroys every sink named
+  `MusicAssassin`; on 2026-08-18 it did that to a running instance, and
+  PipeWire re-attached the orphaned capture stream to the real output's
+  monitor — an audio feedback loop that ran until the app was killed. It now
+  refuses when it finds a live instance (`ALLOW_LIVE=1` overrides).
+  `tests/test_live_e2e.py`'s hardware tier also takes over the default sink;
+  `python -m assassin_live --recover` restores it.
+- Python: `.venv/bin/python` in the repo root. Models resolve from
+  `~/.local/share/music-assassin/models`, the repo's `models/`, or
+  `/usr/share/music-assassin-live/models` (the `.deb`'s).
+- Corpus and sweep outputs under `~/.local/state/music-assassin/bench/`
+  (`corpus/`, `b1/`, `b3/`). **The corpus lives on the machine that built it**
+  — `bench_quality.py --corpus` and the sweep scripts' `CORPUS=`/`OUT=` let a
+  run read it over a mount, but RTF and ms/block are then properties of
+  whichever machine ran it and are not comparable to B1's.
 - Building the harness's reference corpus needs `demucs` (torch), which this
   app deliberately never depends on — run it out-of-process via
   `--demucs-python ~/Documents/venvs/assassin_venv_v0.4.4_cpu/bin/python`.
-- **Detach long runs from the editor.** VS Code crashing has already killed one
-  corpus build mid-run (and once triggered an OOM kill). Start them with
-  `setsid nohup … &` and verify with `ps -o pid,sid` that SID == PID.
-  `build_refs` checkpoints its manifest after every source and skips completed
-  clips, so rerunning the same command resumes; `--rebuild` forces a redo.
-- **Excerpt before separating, and use `htdemucs` not `mdx_extra`.**
-  `scripts/corpus_excerpt.py` cuts a 30 s excerpt per source before demucs ever
-  sees it. It also refuses acapella-looking sources outright and biases its
-  window pick toward the first vocal entrance rather than the loudest moment.
-  `mdx_extra` peaks at 3.6 GB / 132 s even on a 30 s excerpt; `htdemucs` is
-  1.2 GB / 39 s for a modest quality loss — use it on this machine, and it's
-  the corpus's separator of record.
-- `tests/test_live_e2e.py`'s hardware tier and anything calling
-  `RoutingSession.enable()` **take over the system default audio sink**.
-  `python -m assassin_live --recover` restores it if something dies mid-run.
-  Nothing in this session's work touched system audio.
+- **Detach long runs, and never edit a running script.** `setsid nohup … &`,
+  verify SID == PID. bash reads scripts incrementally by byte offset, so
+  editing one mid-run makes it resume at a shifted position — observed
+  2026-08-18: the sweep jumped backwards and re-ran a completed step, silently
+  skipping the next one.
+- **Excerpt before separating, and use `htdemucs`.**
+  `scripts/corpus_excerpt.py` cuts a 30 s excerpt, refuses acapella-looking
+  sources, and biases its window toward the first vocal entrance rather than
+  the loudest moment. `mdx_extra` peaks at 3.6 GB / 132 s; `htdemucs` is
+  1.2 GB / 39 s and is the corpus's separator of record.
 - `.claude/worktrees/` is scratch space for parallel agent worktrees; still
-  not gitignored (noted in the previous handover, still true) — worth adding
-  if it keeps appearing in `git status`.
+  not gitignored.
