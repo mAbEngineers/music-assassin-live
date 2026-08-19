@@ -80,6 +80,9 @@ echo "==> running PyInstaller"
     --collect-all onnxruntime \
     --hidden-import tkinter \
     --add-data "$ROOT/assassin_live/ui/assets/icon.png:." \
+    --add-data "$ROOT/assassin_live/ui/assets/icon_32.png:." \
+    --add-data "$ROOT/assassin_live/ui/assets/icon_48.png:." \
+    --add-data "$ROOT/assassin_live/ui/assets/icon_64.png:." \
     --paths "$ROOT" \
     -y \
     --distpath "$BUILD_DIR/pyinstaller/dist" \

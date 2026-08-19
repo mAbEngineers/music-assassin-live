@@ -21,8 +21,13 @@ drawing and nothing else; the palette and the display scaling live in
 ui/app.py, so there is one place to change either.
 """
 
+import base64
 import math
+import struct
 import tkinter as tk
+import zlib
+
+import numpy as np
 
 TRACK_THICKNESS = 5
 DOT_RADIUS = 9  # noticeably wider than the track — easy to grab
@@ -30,14 +35,99 @@ DOT_RADIUS = 9  # noticeably wider than the track — easy to grab
 # Level meters: the floor of the dB scale the bars are drawn on.
 METER_FLOOR_DB = -60.0
 
+# Rendered shapes, keyed by every argument that changes their pixels. Tk
+# garbage-collects a PhotoImage the moment nothing references it — and then
+# draws nothing, with no error — so this cache is also what keeps them alive.
+_SHAPES: dict = {}
+
+
+def _rgb(colour: str) -> tuple:
+    return tuple(int(colour[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _rrect_sdf(w: int, h: int, r: float) -> np.ndarray:
+    """Signed distance to a rounded rectangle, per pixel centre.
+
+    The reason for the whole detour: the Tk canvas has no antialiasing. Its
+    ovals and smoothed polygons are filled with whole pixels, so every
+    circle in the panel — switch knob, fader handle, status dot — gets a
+    stepped edge, which at these sizes reads as a smudge rather than as a
+    circle. A distance field gives exact edge coverage instead, and numpy is
+    already a hard dependency, so it costs nothing to ship.
+
+    A circle is this with r = min(w, h) / 2, so one function draws both.
+    """
+    ys, xs = np.mgrid[0:h, 0:w]
+    px = np.abs(xs + 0.5 - w / 2.0) - (w / 2.0 - r)
+    py = np.abs(ys + 0.5 - h / 2.0) - (h / 2.0 - r)
+    return (np.hypot(np.maximum(px, 0.0), np.maximum(py, 0.0))
+            + np.minimum(np.maximum(px, py), 0.0) - r)
+
+
+def aa_shape(master, width: int, height: int, *, bg: str, fill: str,
+             radius: float | None = None, outline: str | None = None,
+             outline_px: float = 1.0) -> tk.PhotoImage:
+    """An antialiased rounded rectangle (or circle) as a PhotoImage.
+
+    Composited against `bg` rather than carrying alpha: every one of these
+    sits on a known flat colour, and Tk's own PhotoImage alpha handling
+    varies by build in ways a control panel should not depend on.
+    """
+    width, height = max(1, int(width)), max(1, int(height))
+    r = min(width, height) / 2.0 if radius is None else float(radius)
+    # Keyed by the interpreter as well: a PhotoImage belongs to the Tcl
+    # interpreter that made it, and handing one to a widget in another
+    # (which only happens in tests, but happens) raises rather than draws.
+    key = (master.tk, width, height, bg, fill, r, outline, outline_px)
+    if key in _SHAPES:
+        return _SHAPES[key]
+
+    d = _rrect_sdf(width, height, r)
+    cover = np.clip(0.5 - d, 0.0, 1.0)[..., None]
+    img = np.full((height, width, 3), _rgb(bg), dtype=np.float64)
+    img += (np.array(_rgb(fill), dtype=np.float64) - img) * cover
+    if outline:
+        ring = (cover - np.clip(0.5 - (d + outline_px), 0.0, 1.0)[..., None])
+        img += (np.array(_rgb(outline), dtype=np.float64) - img) * ring
+
+    photo = tk.PhotoImage(master=master, data=base64.b64encode(
+        _png(np.clip(img + 0.5, 0, 255).astype(np.uint8))).decode("ascii"))
+    _SHAPES[key] = photo
+    return photo
+
+
+def _png(rgb: np.ndarray) -> bytes:
+    """Encode an HxWx3 uint8 array as PNG.
+
+    Tk 8.6 reads PNG from base64 `-data` on every build we ship to; its PPM
+    reader wants a file. Twenty lines of zlib is cheaper than a dependency
+    or a temp file per shape.
+    """
+    h, w, _ = rgb.shape
+    # one filter byte (0 = none) per scanline
+    raw = b"".join(b"\x00" + rgb[y].tobytes() for y in range(h))
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        body = tag + data
+        return (struct.pack(">I", len(data)) + body
+                + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6))
+            + chunk(b"IEND", b""))
+
+
+def aa_disc(master, diameter: int, *, bg: str, fill: str) -> tk.PhotoImage:
+    return aa_shape(master, diameter, diameter, bg=bg, fill=fill)
+
 
 def round_rect(canvas: tk.Canvas, x0, y0, x1, y1, r, **kw) -> int:
     """A rounded rectangle, as a smoothed polygon.
 
-    Tk has no rounded-rectangle primitive. Doubling the corner points and
-    asking for a smoothed polygon gets one whose corners are a spline rather
-    than a true arc — indistinguishable at these radii, and one item instead
-    of the four arcs plus two rectangles the exact construction needs.
+    Kept for shapes that are drawn once at a size nobody looks at closely.
+    Anything with a visible curved edge should use aa_shape() instead — see
+    _rrect_sdf for why.
     """
     r = min(r, (x1 - x0) / 2, (y1 - y0) / 2)
     pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r,
@@ -71,6 +161,7 @@ class HSlider(tk.Canvas):
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0)
         self.w, self.h = width, height
+        self.bg_colour = bg
         self.color, self.track = color, track
         self.minv, self.maxv = minv, maxv
         self.value = value
@@ -110,9 +201,10 @@ class HSlider(tk.Canvas):
             xm = self._x_for(mfrac)
             self.create_line(xm, cy - self.dot, xm, cy + self.dot,
                              fill=self.marker_color, width=2)
-        self.create_oval(xh - self.dot, cy - self.dot,
-                         xh + self.dot, cy + self.dot,
-                         fill=self.color, outline="")
+        dia = self.dot * 2
+        self.create_image(xh - self.dot, cy - self.dot, anchor="nw",
+                          image=aa_disc(self, dia, bg=self.bg_colour,
+                                        fill=self.color))
 
     def set(self, value: float, notify: bool = False):
         self.value = max(self.minv, min(self.maxv, value))
@@ -146,6 +238,7 @@ class Switch(tk.Canvas):
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2")
         self.w, self.h = width, height
+        self.bg_colour = bg
         self.track, self.accent = track, accent
         self.knob_off, self.knob_on = knob_off, knob_on
         self.value = bool(value)
@@ -157,14 +250,17 @@ class Switch(tk.Canvas):
 
     def _draw(self):
         self.delete("all")
-        r = self.h / 2
-        fill = self.accent if self._pos > 0.5 else self.track
-        round_rect(self, 1, 1, self.w - 1, self.h - 1, r, fill=fill, outline="")
-        kr = r - 3
-        cx = (1 + r) + (self.w - 2 - 2 * r) * self._pos
-        self.create_oval(cx - kr, r - kr, cx + kr, r + kr,
-                         fill=self.knob_on if self._pos > 0.5 else self.knob_off,
-                         outline="")
+        on = self._pos > 0.5
+        track = self.accent if on else self.track
+        self.create_image(0, 0, anchor="nw", image=aa_shape(
+            self, self.w, self.h, bg=self.bg_colour, fill=track))
+        # The knob's own edge is blended against the track it sits on, not
+        # against the widget background it never touches.
+        knob = max(8, int(round(self.h - 6)))
+        cx = self.h / 2 + (self.w - self.h) * self._pos
+        self.create_image(cx - knob / 2, (self.h - knob) / 2, anchor="nw",
+                          image=aa_disc(self, knob, bg=track,
+                                        fill=self.knob_on if on else self.knob_off))
 
     def _on_click(self, _evt=None):
         self.set(not self.value)
@@ -211,6 +307,7 @@ class PillButton(tk.Canvas):
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0)
         self.w, self.h = width, height
+        self.bg_colour = bg
         self.font = font
         self.command = command
         self._enabled = True
@@ -235,17 +332,23 @@ class PillButton(tk.Canvas):
         self._enabled = enabled
         self.config(cursor=cursor)
         self.delete("all")
-        shade = fill
-        if enabled and self._hovering:
-            shade = _lighten(fill, 0.12)
-        round_rect(self, 1, 1, self.w - 1, self.h - 1, self.h / 2,
-                   fill=shade, outline=outline or shade)
-        x = self.w / 2
+        shade = _lighten(fill, 0.12) if (enabled and self._hovering) else fill
+        self.create_image(0, 0, anchor="nw", image=aa_shape(
+            self, self.w, self.h, bg=self.bg_colour, fill=shade,
+            outline=outline or None, outline_px=max(1.0, self.h / 26.0)))
+        # Laid out from the measured text rather than from fixed offsets:
+        # "stopping…" is twice the width of "ON" and would otherwise sit on
+        # top of its own status dot.
+        dia = max(7, int(round(self.h * 0.22)))
+        gap = dia + int(round(self.h * 0.2))
+        span = self.font.measure(text) + (gap if dot else 0)
+        x = (self.w - span) / 2.0
         if dot:
-            self.create_oval(x - 26, self.h / 2 - 4, x - 18, self.h / 2 + 4,
-                             fill=dot, outline="")
-            x += 6
-        self.create_text(x, self.h / 2, text=text, fill=fg, font=self.font)
+            self.create_image(x, (self.h - dia) / 2, anchor="nw",
+                              image=aa_disc(self, dia, bg=shade, fill=dot))
+            x += gap
+        self.create_text(x, self.h / 2, text=text, fill=fg, font=self.font,
+                         anchor="w")
 
 
 class HoldButton(tk.Canvas):
@@ -262,6 +365,7 @@ class HoldButton(tk.Canvas):
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2")
         self.w, self.h = width, height
+        self.bg_colour = bg
         self.fg, self.border, self.active_bg = fg, border, active_bg
         self.font, self.text = font, text
         self.command = command
@@ -273,9 +377,10 @@ class HoldButton(tk.Canvas):
 
     def _draw(self):
         self.delete("all")
-        round_rect(self, 1, 1, self.w - 1, self.h - 1, self.h / 2,
-                   fill=self.active_bg if self.held else "",
-                   outline=self.border)
+        self.create_image(0, 0, anchor="nw", image=aa_shape(
+            self, self.w, self.h, bg=self.bg_colour,
+            fill=self.active_bg if self.held else self.bg_colour,
+            outline=self.border, outline_px=max(1.0, self.h / 26.0)))
         self.create_text(self.w / 2, self.h / 2, text=self.text,
                          fill=self.fg, font=self.font)
 
@@ -312,6 +417,7 @@ class Dropdown(tk.Canvas):
         super().__init__(parent, width=width, height=height, bg=bg,
                          highlightthickness=0, bd=0, cursor="hand2")
         self.w, self.h = width, height
+        self.bg_colour = bg
         self.field, self.border, self.fg = field, border, fg
         self.muted, self.accent = muted, accent
         self.font = font
@@ -330,18 +436,18 @@ class Dropdown(tk.Canvas):
 
     def _draw(self):
         self.delete("all")
-        round_rect(self, 1, 1, self.w - 1, self.h - 1, 6,
-                   fill=self.field, outline=self.border)
-        pad = 10
-        chevron_x = self.w - 14
-        text = self._fit(self.var.get() or "—", self.w - pad - 26)
+        self.create_image(0, 0, anchor="nw", image=aa_shape(
+            self, self.w, self.h, bg=self.bg_colour, fill=self.field,
+            radius=max(4.0, self.h * 0.22), outline=self.border,
+            outline_px=max(1.0, self.h / 28.0)))
+        pad = max(8, int(round(self.h * 0.34)))
+        text = self._fit(self.var.get() or "—", self.w - pad - self.h)
         self.create_text(pad, self.h / 2, text=text, anchor="w",
                          fill=self.fg, font=self.font)
-        cy = self.h / 2
-        self.create_line(chevron_x - 4, cy - 1, chevron_x, cy + 3,
-                         fill=self.muted, width=1.4)
-        self.create_line(chevron_x, cy + 3, chevron_x + 4, cy - 1,
-                         fill=self.muted, width=1.4)
+        # A glyph rather than two canvas lines: text is the one thing Tk
+        # does antialias, and a 1 px diagonal is the one thing it does worst.
+        self.create_text(self.w - pad, self.h / 2 + 1, text="▾", anchor="e",
+                         fill=self.muted, font=self.font)
 
     def _fit(self, text: str, room: int) -> str:
         """Device descriptions are long and the field is not. Truncate with

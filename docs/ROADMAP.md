@@ -1319,6 +1319,33 @@ The pure formatters — `format_status`, `format_details`, `_lag_text`,
 without a display, which is the same trick `_health()` has used since C4 and
 the reason any of this is testable in CI.
 
+**Then the curves were reported as blurry, and they were.** The Tk canvas
+does not antialias: `create_oval` and smoothed polygons are filled in whole
+pixels, so every circle in the panel — switch knob, fader handle, status
+dot, the dot in the power pill — had a stepped edge, which at 8–18 px reads
+as a smudge rather than as a circle. The badge was worse for a different
+reason: `PhotoImage.subsample()` is point sampling, so scaling the 128 px
+icon to 32 threw away three quarters of the edge information.
+
+Both are fixed without a new dependency. `widgets.aa_shape()` computes a
+rounded-rectangle signed distance field with numpy — already a hard
+dependency — takes exact per-pixel coverage from it, composites against the
+known flat background, and hands Tk a base64 PNG (`_png()`, twenty lines of
+zlib; Tk's PPM reader wants a file, its PNG reader takes `-data`). A circle
+is the same call with radius = half the smaller side, so one function draws
+the switch tracks, the pill, the dropdown fields, the hold button and every
+disc. Shapes are cached by every argument that changes their pixels, keyed
+by the Tcl interpreter as well — a PhotoImage belongs to the interpreter
+that made it, and the cache is also what keeps them alive, since Tk collects
+an unreferenced image and then draws nothing with no error.
+
+Two things stayed as canvas primitives on purpose: the meter bars, which are
+axis-aligned rectangles with nothing to alias, and the fader's track, which
+is a straight bar. The dropdown's chevron became a `▾` glyph — text is the
+one thing Tk does antialias, and a 1 px diagonal is the one thing it does
+worst. The icon badge now loads a pre-rendered `assets/icon_{32,48,64}.png`
+chosen by display scale, which `build_deb.sh` bundles alongside the 128.
+
 ### C5. Tray icon, autostart, and the ON-state question
 
 Still open from the original Phase 2. Settings persistence deliberately does

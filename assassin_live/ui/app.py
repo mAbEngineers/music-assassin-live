@@ -39,7 +39,8 @@ from ..audio.engine import AudioEngine
 from ..audio.routing import RoutingSession, list_sinks, SINK_NAME
 from ..paths import models_dir, SETTINGS_FILE
 from .. import processors
-from .widgets import Dropdown, HoldButton, HSlider, Meter, PillButton, Switch
+from .widgets import (Dropdown, HoldButton, HSlider, Meter, PillButton, Switch,
+                      aa_disc)
 
 BG = "#0d0d10"
 PANEL = "#17171c"
@@ -292,12 +293,8 @@ class App:
 
         left = tk.Frame(head, bg=BG)
         left.pack(side=tk.LEFT, padx=(self.px(PAD), 0))
-        if getattr(self, "_icon_img", None) is not None:
-            # 128 px source: subsample(4) lands exactly on 32. Tk can only
-            # divide by an integer, so a scaled display gets the nearest
-            # step down (3 -> 42 px at 150 %) rather than a blurred resize.
-            step = max(1, min(4, round(4 / self.scale)))
-            self._badge_img = self._icon_img.subsample(step, step)
+        self._badge_img = self._badge_photo()
+        if self._badge_img is not None:
             tk.Label(left, image=self._badge_img, bg=BG).pack(
                 side=tk.LEFT, padx=(0, self.px(11)))
         title = tk.Frame(left, bg=BG)
@@ -312,6 +309,27 @@ class App:
                               command=self._toggle)
         self.btn.pack(side=tk.RIGHT, padx=(0, self.px(PAD)))
         self._paint_button("off")
+
+    def _badge_photo(self):
+        """The header icon, at a size that was resampled properly.
+
+        Tk's only scaler is subsample(), which is point sampling: taking
+        every fourth pixel of a 128 px icon throws away three quarters of
+        the edge information and the result looks smeared rather than small.
+        The sizes are pre-rendered instead (assets/icon_NN.png), and the
+        nearest one up is chosen for the display scale.
+        """
+        target = 32 if self.scale < 1.3 else 48 if self.scale < 1.8 else 64
+        sized = _icon_path().with_name(f"icon_{target}.png")
+        try:
+            if sized.is_file():
+                return tk.PhotoImage(master=self.root, file=str(sized))
+            if getattr(self, "_icon_img", None) is not None:
+                step = max(1, min(4, round(128 / target)))
+                return self._icon_img.subsample(step, step)
+        except tk.TclError:
+            pass
+        return None
 
     def _pick_default_model(self, names: list[str]) -> str:
         for candidate in (self._initial_pipeline, "dpdfnet_hr", "gtcrn"):
@@ -861,8 +879,8 @@ class App:
         """
         self.status.config(text=text, fg=colour)
         self.status_dot.delete("all")
-        d = self.px(9)
-        self.status_dot.create_oval(1, 1, d - 1, d - 1, fill=colour, outline="")
+        self.status_dot.create_image(0, 0, anchor="nw", image=aa_disc(
+            self.status_dot, self.px(9), bg=BG, fill=colour))
         if hold:
             self._hold_until = time.monotonic() + (
                 self.HOLD_FAULT_S if colour in (RED, FAULT) else self.HOLD_INFO_S)
