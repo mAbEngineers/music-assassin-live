@@ -42,21 +42,42 @@ measures to 0.1 ms. So the mechanism is right and something about
 `dpdfnet_hr` in the live app is not.
 
 Leading suspects, in order: the runtime measurement lands on a wrong value
-for real content at stream start (a quiet intro gives a weak correlation
-peak, and after `max_windows` the estimator gives up and assumes zero — which
-is precisely the broken behaviour); or the residual is the rebuild's own
-framing rather than the model lag. **The details panel now prints
-`processor lag:` so the next report can say what it measured** — the expected
-value for `dpdfnet_hr` is ~50 ms, and anything near 0 means the estimator
-gave up.
+for real content at stream start; or the residual is the rebuild's own
+framing rather than the model lag. The estimator's two ways of failing
+quietly have since been closed (ROADMAP B6b), so a bad measurement can no
+longer disguise itself as a good one — but the reading still decides which
+of the remaining suspects it is.
+
+**Read `processor lag:` in the details panel while you can hear it.** It now
+says one of three things, and they are different answers:
+
+| reading | meaning |
+|---|---|
+| `50.0 ms` | measured, correction applied — the residual is something else |
+| `measuring…` | not yet decided; it needs 1.5 s of non-silent audio |
+| `unmeasured (rebuild bypassed)` | no peak worth believing; nothing corrected, rebuild off |
+
+Note what `mix:` says too. Below 100 % it used to be a second, independent
+source of doubling — fixed the same day (ROADMAP B8), and worth confirming
+by ear.
 
 **2. One unexplained report: audio sometimes does not play at all when
 starting from idle.** Not the old broken `pin_stream()` — that is fixed on
 this branch and the run was from the repo. Startup lag (B7) explains *late*,
 not *silent*.
 
-**When it happens, read the status line.** Every path that stops the audio
-writes a distinct message, so it identifies itself:
+**When it happens, read the status line and the meter.** Every path that
+stops the audio writes a distinct message, so it identifies itself — and the
+meter now draws the captured input above the emitted output (C10), which
+splits the one case the messages cannot name:
+
+| meter | meaning |
+|---|---|
+| `in` moving, `out` flat | the engine or the mix — not capture |
+| both flat | capture: nothing is arriving |
+| both moving, nothing audible | routing past our output — the "healthy but silent" case |
+
+The status-line messages:
 
 | message | meaning |
 |---|---|
@@ -71,10 +92,14 @@ writes a distinct message, so it identifies itself:
 **3. By-ear: does the stereo rebuild bring music back** — still unanswered,
 and now blocked behind item 1.
 
-**4. The dry/wet mix is misaligned by the processor's internal lag** (B7's
-closing note). At any mix below 100 % the dry is 50 ms out of step with the
-wet on `dpdfnet_hr`. Unfixed, and it makes the mix slider unreliable as a
-tool for trading vocal damage against music removal.
+**4. The dry/wet mix was misaligned by the processor's internal lag** —
+**fixed 2026-08-19 (B8)**, and the last thing it needs is ears. B6 padded the
+worker's dry copy, which feeds the stereo mask, and left the callback's
+alone, so below 100 % mix the blend was two streams 50 ms apart. Both are
+padded now: measured 0.0 ms skew with the fix against 49.9 ms without it. The
+mix slider should now work as the tool it was meant to be — trading vocal
+damage against music removal — which is worth confirming before B4 starts
+producing candidates to compare with it.
 
 ## The by-ear results so far (2026-08-19)
 
@@ -297,7 +322,31 @@ come from `Music-Assassin/models/sherpa_onnx/sherpa-onnx-spleeter-2stems-int8/`
 (2 × 26 MB — note the `sherpa_onnx/` path component); `scripts/import_models.py`
 now copies them in under the names the registry looks up.
 
-## What landed 2026-08-19
+## What landed 2026-08-19 (second session)
+
+- **B8** — the dry/wet mix carried B6's skew. The lag pad reached
+  `_dry_work` (the mask) and not `_dry_out` (the mix). Both now, handed to
+  the callback thread the way `_pending_lag` is handed to the worker.
+  `latency_ms` subtracts the pad and the FIFO's cap grows by it, or the
+  correction would be trimmed away again. Regression test measures 0.0 ms
+  skew, and 49.9 ms with the fix disabled.
+- **B6b** — the lag estimator could give up and call it zero. Silence no
+  longer consumes windows (20 s of it used to cost thirteen), and exhaustion
+  now means *unmeasured* — no correction, rebuild bypassed, and a state the
+  UI names — rather than a silent assumption of zero. Falling back to the
+  processor's declared latency was considered and rejected: `dpdfnet_hr`
+  declares 10 ms and measures 50, so that is a 40 ms error, not a fallback.
+- **C10** — the meter draws input above output, and the details panel prints
+  both as dBFS. Diagnostic for open item 2 above.
+- **C11** — control panel redesign researched against four shipping audio
+  tools, direction chosen (680 × 430 two-column), **not built** — sequenced
+  after the tag as the first piece of 0.2. Rules, colour resolution and the
+  widget-kit cost are in ROADMAP C11.
+
+Suite green after all of it, including the model tier
+(`test_processors_offline`).
+
+## What landed 2026-08-19 (first session)
 
 - **B6** — the stereo rebuild's mask was 50 ms out of step on `dpdfnet_hr`,
   because the engine paired wet with dry by FIFO position. The lag is now

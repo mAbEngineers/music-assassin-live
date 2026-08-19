@@ -1107,13 +1107,71 @@ for the stereo rebuild's own framing when enabled, and getting it wrong
 misaligns the dry/wet mix. Warming removes the cause; a cap is a separate
 change that needs its own measurement.
 
-**Found while investigating, not yet fixed:** the dry/wet mix does not
-compensate for the processor's internal lag at all. `_dry_out` only absorbs
-what the model holds back, and `dpdfnet_hr` holds back nothing while
-delaying internally by 50 ms — so at any mix below 100 % the dry is 50 ms out
-of step with the wet. The machinery to fix it now exists (delay `_dry_out` by
-`mask_lag` the same way `_dry_work` is delayed); it is a separate change and
-wants its own by-ear check.
+**Found while investigating:** the dry/wet mix does not compensate for the
+processor's internal lag at all. `_dry_out` only absorbs what the model holds
+back, and `dpdfnet_hr` holds back nothing while delaying internally by 50 ms
+— so at any mix below 100 % the dry is 50 ms out of step with the wet.
+**Fixed in B8 below**, 2026-08-19; the by-ear check it wants is still open.
+
+### B8. The dry/wet mix carried the same 50 ms skew ✅ fixed 2026-08-19
+
+B6 measured the processor's lag and delayed the dry stream by it — but only
+`_dry_work`, the worker-thread copy that feeds the stereo mask. The dry a
+listener actually hears below 100 % mix comes from `_dry_out`, drained in the
+callback, and it never got the pad. So B6 aligned the mask and left the mix
+exactly as it was: on `dpdfnet_hr`, a blend of two streams 50 ms apart, which
+is an echo rather than a mix.
+
+Fixed by handing the measured lag to the callback thread the same way
+`_pending_lag` is handed to the worker, so each FIFO is padded by the only
+thread that touches it. Two consequences handled in the same change:
+
+- **`latency_ms` subtracts the pad.** It reports the depth of `_dry_out`,
+  and the pad never drains — it changes *which* dry sample pairs with which
+  wet one, not *when* either leaves. Counting it would have inflated C7's
+  number by the model's lag while nothing audible changed.
+- **The FIFO's cap grows by the pad.** `_dry_out` is trimmed from the head
+  when it exceeds `_max_out`, which is precisely the operation that would
+  throw the correction away again.
+
+**Measured**, `tests/test_stereo_rebuild.py::test_the_mix_is_aligned_with_a_
+processor_that_lags`: the engine is run fully dry and fully wet over the same
+input, and how late each stream emerges is compared after subtracting each
+run's own queue backlog (which varies run to run — the B7 race in miniature,
+and the reason a raw comparison of two pumps is not a measurement). **0.0 ms
+skew with the fix, 49.9 ms without it**, against a 50 ms processor lag.
+
+Costs one dry gap of the lag's length, once, at the moment the pad lands.
+Inaudible at 100 % mix, where the dry gain is zero.
+
+**Still wants ears.** The mix slider was unreliable as a tool for trading
+vocal damage against music removal; whether it now behaves is a by-ear
+question, and B4 will want the answer before it starts producing candidates
+to compare.
+
+### B6b. The estimator could give up and call it zero ✅ hardened 2026-08-19
+
+Two failure modes in the measurement B6 introduced, both found by reading
+the code rather than by a report, and both able to produce exactly the
+symptom B6 fixed:
+
+- **Silence consumed the measurement.** Near-silent pairs were buffered like
+  any other, so a session starting on a quiet intro could spend all six
+  windows on material that could not correlate and give up before the first
+  loud bar arrived. `push()` now drops pairs below an RMS floor: silence is
+  an absent measurement, not a failed one. Measured: 20 s of silence now
+  costs zero windows, where it used to cost thirteen.
+- **Exhaustion meant "assume aligned".** `_mask_lag = 0` applies a
+  correction of the wrong size and enables the rebuild on it. Falling back
+  to the processor's *declared* latency instead would be no better — the
+  table above has `dpdfnet_hr` declaring 10 ms and measuring 50 — so
+  exhaustion now means **unmeasured**: no correction anywhere, the rebuild
+  left bypassed, and a state the UI names. That is the audio you get from
+  never having measured, which is the honest floor.
+
+`AudioEngine.lag_state` returns `measured` / `measuring` / `unmeasured` and
+the details panel prints it, so the three are distinguishable in a report.
+Previously an assumed zero and a measured zero looked identical.
 
 ### C9. The ON/OFF button had no in-progress state ✅ done 2026-08-19
 
@@ -1144,6 +1202,81 @@ UI has to answer at a glance.
 feedback loop, trap gone) — those must not return to a half-on state, and
 blocking the UI is acceptable when the alternative is leaving the trap sink
 installed.
+
+### C10. The meter shows the input as well as the output ✅ done 2026-08-19
+
+One meter, fed from `outdata`, cannot tell a silent session from an idle one
+— which is the whole difficulty with the open "audio sometimes does not play
+at all" report, since every *other* failure path writes a status message that
+names itself. Recording the input's RMS beside the output's splits it three
+ways on sight: input moving and output flat is the engine or the mix, both
+flat is capture, both moving with nothing audible is routing past our output
+— the case the status line calls healthy because it *is* healthy.
+
+`recent_input_levels()` beside `recent_levels()`; the meter draws two
+labelled rows; the details panel prints both as dBFS.
+
+### C11. Control panel redesign — direction chosen 2026-08-19, not built
+
+**Reported:** "the status thing is better in the on/off button now but the
+button itself does not look good", with a request to research shipping UIs
+before changing anything.
+
+Four tools that solve the same layout problem were looked at: SoundSource 6,
+Easy Effects, NVIDIA Broadcast, Krisp. They agree far more than they differ,
+and the agreements are the material:
+
+- **Booleans are capsule switches**, label left, switch right, in a list.
+  Four out of four. Our three full-width `tk.Button` toggles reading
+  `Band-Limit (20 Hz-20 kHz): ON` are the single biggest thing making the
+  window look homemade — and the band-limit one paints a red bar across the
+  window *because it is on*, making the calmest state in the app the loudest
+  thing in it.
+- **The accent means one thing: active.** Green in three, violet in the
+  fourth. We use the same red for an enabled toggle, the fader fill, the
+  meter, and `audio stream died`.
+- **Numbers are anchored and monospaced**, pinned to a bottom edge (Easy
+  Effects: `48,0 kHz  5,0 ms  −19 −19 dB`). Ours are centred body text that
+  re-centres as the message changes length.
+- **Dropdowns are filled pills** with the label beside them, not stacked
+  above — which also buys back ~16 px a row.
+- **Grouping is by function**, three or four labelled groups. Ours has eight
+  loose blocks.
+- **Nothing jumps.** Optional controls expand inside their group; ours packs
+  a whole card into the window when `speechdenoiser` is selected.
+
+**Chosen: a 680 × 430 two-column panel** (the "Desk" direction), against the
+alternative of keeping the 420 × 600 portrait shape and tidying it. The
+references all sit near 1.6:1, but the reason to follow them here is
+specific: the two controls that need pixels are the meter and the 0–300 %
+fader, the content genuinely is two groups of two (what the audio passes
+through, what it is doing), and C5's tray icon would make this a window that
+is opened, read and dismissed rather than parked.
+
+Colour, resolved: `#ef4056` stays the brand and means *the amount of music
+being removed* (meter, fader fill, icon); `#2ecc71` becomes *running/on*
+(power pill, switch tracks, health dot); amber stays transitional; red text
+stays faults, with a left stripe so it is not colour alone.
+
+**Cost**, no new dependencies — four more Canvas widgets in the pattern
+`HSlider` already established (a `Switch`, a `PillButton`, a `Dropdown`
+backed by a styled `tk.Menu` replacing `ttk.Combobox` and its `option_add`
+hacks, a two-row `Meter`), plus a `HoldButton` driving the existing
+`engine.set_bypass()` for hold-to-compare. Cards stay square-cornered
+`tk.Frame`s with a hairline border: rounding them means drawing each group on
+a Canvas and placing its children with `create_window`, trading every layout
+guarantee `pack()` gives for a radius nobody will notice.
+
+Three things to get right while in there: **pick a font** by probing
+`tkinter.font.families()` rather than asking Tk for `"Sans"` and taking
+whatever X hands over; **set `tk scaling`** from the display's DPI; and
+**keep the colour decisions in pure functions** the way `_health()` already
+is, so they stay testable on a CI box with no display. `tests/test_status_line.py`
+imports `AMBER`, `ON_COLOR` and `RED` by name — keep them as aliases into
+whatever the new token set is called.
+
+**Sequenced after the 0.1.4 tag**, as the first piece of 0.2. C10's second
+meter was pulled forward because it closes a diagnostic gap now.
 
 ### C5. Tray icon, autostart, and the ON-state question
 
