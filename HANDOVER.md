@@ -1,6 +1,6 @@
 # Handover — current state
 
-Updated 2026-08-18. **This file is deliberately short.** It covers only where
+Updated 2026-08-19. **This file is deliberately short.** It covers only where
 things stand *right now* and what to do next. The plan, the reasoning, the
 measured findings and the list of dead ends all live in
 [`docs/ROADMAP.md`](docs/ROADMAP.md) — read that before re-deriving anything.
@@ -30,7 +30,7 @@ step; it has never run.
 
 ## What gates the 0.1.4 tag — three things, all needing a human
 
-**1. The app has never been launched with any of this.** Fourteen commits
+**1. The app has never been launched with any of this.** Thirteen commits
 changed the engine, the routing backend and the UI. Eight test files cover the
 logic offline and two spikes verified mechanisms against a real PipeWire
 graph, but the actual application has not been run once: `_switch_output`,
