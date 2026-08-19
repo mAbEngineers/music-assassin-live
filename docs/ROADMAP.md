@@ -1216,7 +1216,7 @@ flat is capture, both moving with nothing audible is routing past our output
 `recent_input_levels()` beside `recent_levels()`; the meter draws two
 labelled rows; the details panel prints both as dBFS.
 
-### C11. Control panel redesign — direction chosen 2026-08-19, not built
+### C11. Control panel redesign ✅ built 2026-08-19
 
 **Reported:** "the status thing is better in the on/off button now but the
 button itself does not look good", with a request to research shipping UIs
@@ -1275,8 +1275,49 @@ is, so they stay testable on a CI box with no display. `tests/test_status_line.p
 imports `AMBER`, `ON_COLOR` and `RED` by name — keep them as aliases into
 whatever the new token set is called.
 
-**Sequenced after the 0.1.4 tag**, as the first piece of 0.2. C10's second
-meter was pulled forward because it closes a diagnostic gap now.
+**Built the same day.** `ui/widgets.py` gained `Switch`, `PillButton`,
+`HoldButton`, `Dropdown` and `Meter` (plus `round_rect` and `db_fraction`);
+`ui/app.py` is the two-column layout, the pickers, the switches, the meters,
+the status bar and the details overlay. Five things the drawing did not
+settle, all decided against a render rather than on paper:
+
+- **The window is sized from its content, floored at 680 × 430.** Nominal
+  pixel sizes assume a font, and the font is whatever the machine has:
+  measured, the processing card wanted 199 px and had 171, so `pack()`
+  silently squeezed the suppression-limit row to 2 px — the redesign's own
+  "nothing jumps" rule, broken by the redesign. `_fit_window()` adds the
+  cards up and grows the window to fit (446 px with the design's fonts). The
+  optional row is packed while measuring, so its space is reserved while it
+  is hidden and selecting `speechdenoiser` reveals a control in place.
+- **The details fold covers the right column**, not the whole panel. Reading
+  counters and watching the meter are different activities; the devices and
+  switches stay reachable. It is `place()`d, so the window does not resize.
+- **The counters are aligned key/value rows**, not four dense lines of
+  `key: value  key: value`. They are read when something is wrong, which is
+  the worst moment to make someone parse a line.
+- **The meter's dB annotation became two gridlines** at −6 and −20 dBFS
+  rather than the axis the mockup drew along the bottom. That axis was
+  wrong: the horizontal axis of a level history is *time*, and the mockup
+  had copied a spectrum analyser's frequency scale into a place where it
+  could not mean anything. Bars are on a dB scale now (`db_fraction`) —
+  linear amplitude puts music at 5 % of the row and makes any dB mark a lie.
+- **Status messages hold.** The supervision tick rewrote the line every
+  second, so `feedback loop detected — turned off` was erased before it
+  could be read and replaced with `idle`. Faults hold 20 s, other messages
+  4 s. This matters for the open silent-from-idle report, where the user is
+  specifically asked to go and read that line.
+
+Also landed with it: hold-to-compare (`_compare()` sets intensity directly
+rather than calling `set_bypass()`, which restores 1.0 on release and would
+quietly move the user's mix to fully wet), the wet-boost readout, a font
+probe, and a display scale applied to every dimension including `HSlider`'s
+handle. Verified by rendering the real window under Xvfb at 100 % and 150 %
+— `MUSIC_ASSASSIN_UI_SCALE` overrides the probe for exactly that.
+
+The pure formatters — `format_status`, `format_details`, `_lag_text`,
+`_level_db`, `_boost_label` — are tested in `tests/test_status_line.py`
+without a display, which is the same trick `_health()` has used since C4 and
+the reason any of this is testable in CI.
 
 ### C5. Tray icon, autostart, and the ON-state question
 

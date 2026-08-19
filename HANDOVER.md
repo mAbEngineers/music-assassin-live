@@ -48,8 +48,9 @@ quietly have since been closed (ROADMAP B6b), so a bad measurement can no
 longer disguise itself as a good one — but the reading still decides which
 of the remaining suspects it is.
 
-**Read `processor lag:` in the details panel while you can hear it.** It now
-says one of three things, and they are different answers:
+**Read the lag while you can hear it.** It is on the status bar
+(`… · 50 ms · lag 50.0 ms`) and in `details ▸`, and it says one of three
+things, which are different answers:
 
 | reading | meaning |
 |---|---|
@@ -66,10 +67,11 @@ starting from idle.** Not the old broken `pin_stream()` — that is fixed on
 this branch and the run was from the repo. Startup lag (B7) explains *late*,
 not *silent*.
 
-**When it happens, read the status line and the meter.** Every path that
-stops the audio writes a distinct message, so it identifies itself — and the
-meter now draws the captured input above the emitted output (C10), which
-splits the one case the messages cannot name:
+**When it happens, read the status bar and the meter.** Every path that
+stops the audio writes a distinct message, so it identifies itself, and the
+message now stays on screen for 20 s instead of being overwritten by the
+next tick. The meter draws the captured input above the emitted output
+(C10), which splits the one case the messages cannot name:
 
 | meter | meaning |
 |---|---|
@@ -338,10 +340,18 @@ now copies them in under the names the registry looks up.
   declares 10 ms and measures 50, so that is a 40 ms error, not a fallback.
 - **C10** — the meter draws input above output, and the details panel prints
   both as dBFS. Diagnostic for open item 2 above.
-- **C11** — control panel redesign researched against four shipping audio
-  tools, direction chosen (680 × 430 two-column), **not built** — sequenced
-  after the tag as the first piece of 0.2. Rules, colour resolution and the
-  widget-kit cost are in ROADMAP C11.
+- **C11** — control panel rebuilt as the 680 × 430 two-column panel:
+  capsule switches instead of three full-width buttons, a pill power
+  control, `tk.Menu`-backed dropdowns instead of `ttk.Combobox`, the two
+  meters on a dB scale, hold-to-compare, a wet-boost readout, and a status
+  bar welded to the bottom edge. Colour now means one thing at a time — red
+  is the brand and the quantity being changed, green is *running*, and red
+  text is a fault and only ever text. Details in ROADMAP C11, including the
+  five things the drawing did not settle and a render did.
+- **Status messages now hold** (4 s, 20 s for faults). The tick used to
+  overwrite the line every second, so a fault was erased before it could be
+  read — from the one screen this handover tells you to go and read when the
+  audio stops.
 
 Suite green after all of it, including the model tier
 (`test_processors_offline`).
