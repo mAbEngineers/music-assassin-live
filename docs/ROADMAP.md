@@ -1026,6 +1026,36 @@ every time is the only thing that stays true as more are added.
 `object.__new__` because constructing the real app builds widgets and takes
 over a display.
 
+### C9. The ON/OFF button had no in-progress state ✅ done 2026-08-19
+
+**Reported by ear, 2026-08-19:** "when the on/off button is pressed it takes
+some time to change but has no effect that it's doing something, so a person
+tries re-clicking to reverse".
+
+Not polish — a correctness bug with a UX symptom. Turning on creates the trap
+sink (polls the graph up to 3 s), loads an ONNX model cold (~0.5 s, measured)
+and opens a PortAudio stream (another poll up to 3 s), and all of it ran on
+the Tk thread. So the button could not repaint, and a second click did not
+cancel the wait — it **queued**, and undid the action the instant the first
+finished. The user's instinct to re-click was the worst possible move, and
+nothing in the UI discouraged it.
+
+Fixed by moving the work off the Tk thread (`_work_on` / `_work_off`, which
+touch no widgets) and polling for the result every 80 ms. The button carries
+four states — `● OFF`, `◐ starting…`, `● ON`, `◑ stopping…` — and is
+*disabled* while transitioning, so a re-click is discarded rather than
+queued. It repaints **before** the work starts, since the whole complaint is
+that nothing visibly happened.
+
+Glyph as well as colour, because a colour-only state is invisible to a
+meaningful fraction of users, and "is it on?" is the one question this app's
+UI has to answer at a glance.
+
+`_turn_off()` survives as the synchronous emergency path (stream died,
+feedback loop, trap gone) — those must not return to a half-on state, and
+blocking the UI is acceptable when the alternative is leaving the trap sink
+installed.
+
 ### C5. Tray icon, autostart, and the ON-state question
 
 Still open from the original Phase 2. Settings persistence deliberately does

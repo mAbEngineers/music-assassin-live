@@ -12,6 +12,7 @@ when the output device changes (Bluetooth headset reconnects etc.).
 import json
 import os
 import sys
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, messagebox
@@ -115,6 +116,10 @@ class App:
         # every one. Fast enough that nobody sits in a feedback loop for
         # long, cheap enough to leave on permanently.
         self._capture_tick = 0
+        # Set while a start/stop is in flight. The button is disabled during
+        # it, so this is only a second line of defence against re-entry.
+        self._busy = False
+        self._result = None
         RoutingSession.recover_stale()
         self._refresh_outputs()
         self.root.after(1000, self._tick)
@@ -172,12 +177,15 @@ class App:
         tk.Label(title, text="live music removal", font=("Sans", 9),
                  bg=BG, fg=SUBTEXT).pack(anchor="w")
 
-        self.btn = tk.Button(row, text="OFF", font=("Sans", 11, "bold"),
-                             fg="white", bg=OFF_COLOR, activebackground=OFF_COLOR,
-                             activeforeground="white", bd=0, relief=tk.FLAT,
-                             highlightthickness=0, padx=18, pady=8,
+        # A dot beside the label rather than colour alone: the three states
+        # have to be distinguishable at a glance and while transitioning,
+        # and colour-only status is invisible to a chunk of users.
+        self.btn = tk.Button(row, font=("Sans", 11, "bold"),
+                             fg="white", bd=0, relief=tk.FLAT,
+                             highlightthickness=0, padx=22, pady=10,
                              cursor="hand2", command=self._toggle)
         self.btn.pack(side=tk.RIGHT, anchor="e")
+        self._paint_button("off")
 
     def _pick_default_model(self, names: list[str]) -> str:
         for candidate in (self._initial_pipeline, "dpdfnet_hr", "gtcrn"):
@@ -456,41 +464,113 @@ class App:
             self._say(f"could not switch output, turned off: {e}", RED)
 
     # -- actions ---------------------------------------------------------------
-    def _toggle(self):
-        if self.enabled:
-            self._turn_off()
-        else:
-            self._turn_on()
+    # Button states. Turning on creates the trap sink (polls the graph up to
+    # 3 s), loads an ONNX model cold (~0.5 s) and opens a PortAudio stream
+    # (another poll up to 3 s). Doing that on the Tk thread froze the UI, so
+    # the button could not repaint and a second click did not cancel the wait
+    # — it QUEUED, and undid the action the moment the first one finished.
+    # Hence: the work moves to a thread, and the button says what it is doing.
+    _BTN_STATES = {
+        "off":      ("● OFF",       OFF_COLOR, "white",   "hand2",  tk.NORMAL),
+        "starting": ("◐ starting…", AMBER,     "#1a1a1a", "watch",  tk.DISABLED),
+        "on":       ("● ON",        ON_COLOR,  "#0d2a17", "hand2",  tk.NORMAL),
+        "stopping": ("◑ stopping…", AMBER,     "#1a1a1a", "watch",  tk.DISABLED),
+    }
 
-    def _turn_on(self):
+    def _paint_button(self, state: str) -> None:
+        text, bg, fg, cursor, btn_state = self._BTN_STATES[state]
+        self.btn.config(text=text, bg=bg, fg=fg, activebackground=bg,
+                        activeforeground=fg, cursor=cursor, state=btn_state,
+                        disabledforeground=fg)
+
+    def _toggle(self):
+        if self._busy:
+            return          # disabled anyway; belt and braces
+        if self.enabled:
+            self._begin_transition("stopping", self._work_off)
+        else:
+            self._begin_transition("starting", self._work_on)
+
+    def _begin_transition(self, state: str, work) -> None:
+        self._busy = True
+        self._result = None
+        self._paint_button(state)
+        self._say("starting…" if state == "starting" else "stopping…", AMBER)
+        # Paint before the work starts, not after: the whole complaint is
+        # that nothing visibly happened for several seconds.
+        self.root.update_idletasks()
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(80, self._poll_transition)
+
+    def _work_on(self) -> None:
+        """Runs OFF the Tk thread — must not touch a single widget."""
         try:
             proc = processors.create(self.model.get(), models_dir())
             real = self.routing.enable()
             if real is None:
                 self.routing.disable()
-                messagebox.showwarning(
-                    "No output device",
-                    "No hardware audio sink found (Bluetooth asleep?). "
-                    "Play something / reconnect and try again.")
+                self._result = ("nosink", None, None)
                 return
-            self.engine = AudioEngine(proc, self.routing)
-            self.engine.set_intensity(self.mix_pct / 100.0)
-            self.engine.set_volumes(wet=self._wet_boost(self.mix_pct))
-            self.engine.set_midside(self.midside_enabled)
-            self.engine.set_bandlimit(self.bandlimit_enabled)
-            self.engine.set_stereo(self.stereo_enabled)
-            self.engine.set_atten_limit(self.atten_db)
-            self._push_mutes()
-            self.engine.start(self.routing.monitor_source, real.name)
+            engine = AudioEngine(proc, self.routing)
+            engine.set_intensity(self.mix_pct / 100.0)
+            engine.set_volumes(wet=self._wet_boost(self.mix_pct))
+            engine.set_midside(self.midside_enabled)
+            engine.set_bandlimit(self.bandlimit_enabled)
+            engine.set_stereo(self.stereo_enabled)
+            engine.set_atten_limit(self.atten_db)
+            engine.start(self.routing.monitor_source, real.name)
             self.routing.adopt_volume()
-            self.enabled = True
-            self.btn.config(text="ON", bg=ON_COLOR, activebackground=ON_COLOR)
-        except Exception as e:  # noqa: BLE001 — surface anything to the user
-            self.routing.disable()
+            self._result = ("on", engine, real)
+        except Exception as e:  # noqa: BLE001 — surfaced on the Tk thread
+            try:
+                self.routing.disable()
+            except Exception:  # noqa: BLE001
+                pass
+            self._result = ("error", None, e)
+
+    def _work_off(self) -> None:
+        """Also off-thread: engine.stop() joins the worker and closes the
+        PortAudio stream, which is not instant either."""
+        try:
             if self.engine:
                 self.engine.stop()
-                self.engine = None
-            messagebox.showerror("Enable failed", str(e))
+            self.routing.disable()
+            self._result = ("off", None, None)
+        except Exception as e:  # noqa: BLE001
+            self._result = ("error", None, e)
+
+    def _poll_transition(self) -> None:
+        if self._result is None:
+            self.root.after(80, self._poll_transition)
+            return
+        kind, payload, extra = self._result
+        self._result = None
+        self._busy = False
+        if kind == "on":
+            self.engine = payload
+            self.enabled = True
+            self._push_mutes()
+            self._paint_button("on")
+            self._say(f"filtering → {extra.description or extra.name}")
+        elif kind == "off":
+            self.engine = None
+            self.enabled = False
+            self._paint_button("off")
+            self._say("idle")
+        elif kind == "nosink":
+            self.enabled = False
+            self._paint_button("off")
+            self._say("no hardware output found — reconnect and try again", AMBER)
+            messagebox.showwarning(
+                "No output device",
+                "No hardware audio sink found (Bluetooth asleep?). "
+                "Play something / reconnect and try again.")
+        else:
+            self.engine = None
+            self.enabled = False
+            self._paint_button("off")
+            self._say(f"could not start: {extra}", RED)
+            messagebox.showerror("Enable failed", str(extra))
 
     # How often to verify what we are capturing, in ticks (~1 s each).
     CAPTURE_CHECK_TICKS = 5
@@ -587,12 +667,21 @@ class App:
         return True
 
     def _turn_off(self):
+        """Synchronous stop, for failure paths that must not leave a half-on
+        state (stream died, feedback loop, trap gone).
+
+        The user-initiated stop goes through _work_off on a thread; this one
+        accepts blocking the UI because it is already an emergency and the
+        alternative is leaving the trap sink installed.
+        """
         if self.engine:
             self.engine.stop()
             self.engine = None
         self.routing.disable()
         self.enabled = False
-        self.btn.config(text="OFF", bg=OFF_COLOR, activebackground=OFF_COLOR)
+        self._busy = False
+        self._result = None
+        self._paint_button("off")
 
     # -- live waveform meter -----------------------------------------------------
     def _wave_tick(self):
