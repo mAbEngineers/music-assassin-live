@@ -180,13 +180,34 @@ the side channel, in a different column.
 budget over a process that only runs every `chunk_ms`. The spike's table is
 the latency authority.
 
-### A1 sweep — two of three steps in, and the curve never flattens
+### A1 sweep — complete, all three steps, and the curve never flattens
 
-`~/.local/state/music-assassin/bench/a1`. `chunk_all` (whole corpus) still
-running; the two scoped steps are done and already answer the shape.
+`~/.local/state/music-assassin/bench/a1`. Whole corpus, 104 item-ratio pairs:
+
+| config | music | vocal | dSI-SDR | musNoise | stereo | lat ms |
+|---|---|---|---|---|---|---|
+| `spleeter_4000ms` | −35.03 | **−0.17** | **9.72** | 8.91 | −11.63 | 4093 |
+| `spleeter_2000ms` | −36.83 | −0.22 | 7.89 | 15.84 | −12.72 | 2093 |
+| `spleeter_1000ms` | −37.79 | −0.32 | 6.58 | 23.17 | −12.97 | 1093 |
+| `spleeter_500ms` | −38.06 | −0.63 | 4.56 | 26.57 | −14.53 | 593 |
+| `dpdfnet_hr` | **−46.13** | −4.96 | 4.19 | **1.02** | −160.93 | 50 |
+| `spleeter_250ms` | −35.39 | −1.32 | 2.11 | 13.62 | −15.55 | 343 |
+
+**The `dpdfnet_hr` row reproduces B3's whole-corpus row exactly** (−46.13 /
+−4.96 / +4.19 / −160.93). That is the cross-check that the `wants_stereo`
+branch added to `run_chain` left the mono path untouched — the baseline is
+bit-for-bit the number B3 measured before the change.
+
+Whole-corpus per-band vocal damage, sub/low/mid/high/air: `dpdfnet_hr`
+−4.8 / −4.3 / −7.0 / −8.6 / −9.1 against `spleeter_4000ms` −0.3 / −0.1 /
+−0.2 / −0.6 / −2.6. `dpdfnet_hr` fires `vocal-loss` on 36/104,
+`hf-loss-4k` 30/104, `hf-loss` 28/104 and `stereo-collapse` 104/104; Spleeter
+fires none of the first three at any chunk (bar 2/104 at 250 ms). It also
+removes **109%** of the offline ceiling's music — it over-suppresses — while
+reaching 17% of its dSI-SDR against `spleeter_4000ms`'s 40%.
 
 `male_lead` (8 clips × 2 ratios), the category where B1 found `dpdfnet_hr`
-weakest and most vocally damaging:
+weakest and most vocally damaging, is the same story amplified:
 
 | config | music | vocal | dSI-SDR | musNoise | stereo | lat ms |
 |---|---|---|---|---|---|---|
@@ -217,11 +238,15 @@ SI-SDR scoring trap — the band table measures the damage directly.
 `pumping` also fire more. So the trade is the mirror image of the shipped
 default's: voice intact, more music left, noisier.
 
-**The chunking penalty is confined below 1 s.** `boundary-sensitive` fires
-16/16 at 250 ms, 12/16 at 500 ms, 5/16 at 1 s, 3/16 at 2 s, 0/16 at 4 s —
-the 8–11 dB chunked-vs-one-shot gap surfacing as an artifact only at small
-chunks. 250 ms is also the only config whose vocal damage is worse than
-`dpdfnet_hr`'s in any band.
+**The chunking penalty scales with chunk size, as the −8 to −11 dB
+chunked-vs-one-shot gap predicted.** `boundary-sensitive` over the whole
+corpus: 102/104 at 250 ms, 70 at 500 ms, 28 at 1 s, 14 at 2 s, 4 at 4 s.
+Musical noise tracks it (26.6 → 8.9 across the same range), so the artifact
+cost and the quality gain point the same way — both argue for bigger chunks,
+which is the whole problem. 250 ms is the only config whose vocal damage is
+worse than `dpdfnet_hr`'s in any band.
+
+The `chunk_all` step took 7.5 h; the two scoped steps 34 and 72 min.
 
 On `sparse_acoustic` the same shape holds (dSI-SDR 4.27 → 13.06 across the
 range, `dpdfnet_hr` 9.39) but the gap is far smaller, because `dpdfnet_hr`
