@@ -13,7 +13,7 @@ measured findings and the list of dead ends all live in
 |---|---|---|
 | `main` | 0.1.4, green on the offline suite | at `8df4f83` |
 | `feature/stereo-output` | B3 stereo rebuild, `wants_stereo`, C1, C2, C3, C4, C7, C8, E1 | **13 commits, unpushed** |
-| `feat/separator-spike` | A1 spike + the SpleeterProcessor and its sweep | 3 commits, off the above |
+| `feat/separator-spike` | A1 spike + the SpleeterProcessor and its sweep, then B6/B7/C9 | 5 commits, off the above |
 | `feature/windows-packaging` | installer scaffolding | not merged — app can't run on Windows (D3) |
 
 Pushing needs to happen from a machine with credentials — this session had
@@ -28,46 +28,80 @@ That first push is also the **first exercise of the new CI workflow**
 (`.github/workflows/tests.yml`). Expect a possible iteration on the apt/pip
 step; it has never run.
 
-## What gates the 0.1.4 tag — three things, all needing a human
+## What gates the 0.1.4 tag
 
-**1. The app has never been launched with any of this.** Thirteen commits
-changed the engine, the routing backend and the UI. Eight test files cover the
-logic offline and two spikes verified mechanisms against a real PipeWire
-graph, but the actual application has not been run once: `_switch_output`,
-`_check_capture`, `_say`, `sync_volume`/`adopt_volume`, the status line, the
-details toggle. Smoke checklist:
+**The app has now been run** (2026-08-19, from the repo:
+`.venv/bin/python -m assassin_live` — not the `.deb`, which is still `main`).
+That session produced four defect reports, three fixed and one open. What
+remains before tagging:
 
-| check | expected |
+**1. Doubling still reported with the stereo rebuild on `dpdfnet_hr`.**
+B6's fix is confirmed working on `dtln` (8 ms lag) and in the offline
+regression test with a processor lagging 2400 samples, which the estimator
+measures to 0.1 ms. So the mechanism is right and something about
+`dpdfnet_hr` in the live app is not.
+
+Leading suspects, in order: the runtime measurement lands on a wrong value
+for real content at stream start (a quiet intro gives a weak correlation
+peak, and after `max_windows` the estimator gives up and assumes zero — which
+is precisely the broken behaviour); or the residual is the rebuild's own
+framing rather than the model lag. **The details panel now prints
+`processor lag:` so the next report can say what it measured** — the expected
+value for `dpdfnet_hr` is ~50 ms, and anything near 0 means the estimator
+gave up.
+
+**2. One unexplained report: audio sometimes does not play at all when
+starting from idle.** Not the old broken `pin_stream()` — that is fixed on
+this branch and the run was from the repo. Startup lag (B7) explains *late*,
+not *silent*.
+
+**When it happens, read the status line.** Every path that stops the audio
+writes a distinct message, so it identifies itself:
+
+| message | meaning |
 |---|---|
-| toggle ON | `Filtering → <device> · ~50 ms · healthy` |
-| `details ▸` | counters appear/disappear |
-| change output in the app | no multi-second dropout |
-| change output in GNOME | dropdown follows in ~0.25 s, status says `output → X` |
-| volume keys | audio level changes; slider stays where you put it |
-| on launch | **no** `could not pin audio streams to their targets` warning |
+| `feedback loop detected (capturing our own output) — turned off` | C8 fired — possibly correctly, possibly a false positive |
+| `capture is connected to the wrong device — turned off` | C8, wrong capture peer |
+| `audio device disappeared — turned off, switch back on to rebuild` | trap sink gone |
+| `audio stream died, restart failed: …` | PortAudio stream lost |
+| `Filtering → … · healthy` **while silent** | the interesting case: healthy stream, no sound — routing, not the engine |
 
-That last line is the direct test of the pid fix below. If it still warns,
-`pin_stream()` is still dead and C1/C8 rest on nothing.
+**By-ear: which model** — partly done and **partly confounded**, see below.
 
-**2. By-ear: which model.** B1's numbers rank candidates; they do not settle
-quality, and the harness says so itself.
+**3. By-ear: does the stereo rebuild bring music back** — still unanswered,
+and now blocked behind item 1.
 
-```
-B=~/.local/state/music-assassin/bench/b1 SECS=12 scripts/ab_listen.sh male a200
-```
+**4. The dry/wet mix is misaligned by the processor's internal lag** (B7's
+closing note). At any mix below 100 % the dry is 50 ms out of step with the
+wet on `dpdfnet_hr`. Unfixed, and it makes the mix slider unreliable as a
+tool for trading vocal damage against music removal.
 
-Blind by default. The trap is specific: `dtln` beats `dpdfnet_hr` on
-`male_lead` dSI-SDR (+1.07 vs +0.33) while removing **28 dB less music**
-(−20.0 vs −48.4). SI-SDR may simply not be scoring what this app is for.
+## The by-ear results so far (2026-08-19)
 
-**3. By-ear: does the stereo rebuild bring music back.**
+| finding | status |
+|---|---|
+| `dtln` leaves audible music noise and sounds muffled | matches the numbers: −20.6 dB music left vs `dpdfnet_hr`'s −46.1, and an air band at −59.7 dB (it is 16 kHz-native) |
+| `dpdfnet_hr` drops vocals more, but leaves no music noise | matches: `vocal-loss` 36/104 pairs, `music_supp` −46.1 dB |
+| stereo rebuild doubled the audio | **B6 fixed** — confirmed gone on `dtln`, but **still reported on `dpdfnet_hr`**, see open items |
+| starting from idle came up late / out of sync | **B7, fixed** |
+| the ON/OFF button gave no feedback and re-clicking reversed it | **C9, fixed** |
 
-```
-B=~/.local/state/music-assassin/bench/b3 scripts/ab_listen.sh sparse a200 --sighted
-```
+**`dpdfnet_hr` stays the default.** `dtln` and `gtcrn` are both 16 kHz-native
+and delete everything above 8 kHz, which is disqualifying for anyone who
+notices it — so the choice was never really three-way.
 
-Sighted, because this compares one model against itself with one flag flipped.
-**This is the question the numbers cannot answer** — see below.
+**But treat the model ranking as provisional.** After B6 was fixed the same
+listener reported `dtln` with "better audio retention and much less music
+noise", which is a different judgement from the first pass. If the stereo
+toggle was on during that first comparison, it ran through a mask 50 ms out
+of step and every model would have sounded smeared and noisier. The
+comparison is worth redoing now that the rebuild is correct — blind, via
+`scripts/ab_listen.sh`, rather than through the app.
+
+**The standing product judgement, which no metric captures:** vocal
+preservation matters more than music removal. B1 ranked by dSI-SDR, which
+weights them the other way, and that is how `dtln` came out ahead on paper
+while destroying the top octave of every voice.
 
 ## The stereo work (B3) — built, measured, still shipped OFF
 
@@ -262,6 +296,23 @@ Use `~/Documents/venvs/assassin_venv_v0.4.4_cpu/bin/python` (1.13.4). Models
 come from `Music-Assassin/models/sherpa_onnx/sherpa-onnx-spleeter-2stems-int8/`
 (2 × 26 MB — note the `sherpa_onnx/` path component); `scripts/import_models.py`
 now copies them in under the names the registry looks up.
+
+## What landed 2026-08-19
+
+- **B6** — the stereo rebuild's mask was 50 ms out of step on `dpdfnet_hr`,
+  because the engine paired wet with dry by FIFO position. The lag is now
+  measured at stream start (`audio/lag.py`) and the dry stream delayed by it.
+  Two mistakes on the way, both recorded in ROADMAP B6: correlating on the
+  inference worker took the pipeline floor from 20 ms to 60 ms, and a
+  tone-only test signal reported lag 0 with confidence 0.46 because the true
+  lag was ~11 periods of the test tone.
+- **B7** — cold ONNX warm-up took 26 blocks against 1 warm, and everything
+  arriving meanwhile piled into the dry FIFO, whose depth *is* the session's
+  latency. 140 ms baked in instead of 20, varying run to run. The processor
+  is now warmed inside `start()` before the stream opens.
+- **C9** — the ON/OFF button ran its work on the Tk thread, so it could not
+  repaint and a second click *queued* rather than cancelling, undoing the
+  action. Now threaded, with four states and disabled while transitioning.
 
 ## What else landed 2026-08-18
 

@@ -785,9 +785,21 @@ class App:
                     f"Filtering → {out} · {self.engine.latency_ms:.0f} ms · {word}",
                     colour)
                 if self.details_on.get():
+                    # The measured processor lag is here because it is the
+                    # number that decides whether the stereo rebuild's mask
+                    # lines up with the audio it shapes (ROADMAP B6). When
+                    # that is wrong the symptom is doubled, smeared audio,
+                    # and without a readout there is nothing to report but
+                    # the symptom.
+                    lag = self.engine._mask_lag
+                    lag_txt = ("measuring…" if lag is None
+                               else f"{lag / 48000 * 1000:.1f} ms")
                     self.details.config(text=(
                         f"model: {self.model.get()}  "
                         f"{s.worker_ms_avg:.1f} ms/block (20 ms budget)\n"
+                        f"processor lag: {lag_txt}   "
+                        f"stereo: {'on' if self.stereo_enabled else 'off'}   "
+                        f"mix: {round(self.mix_pct)}%\n"
                         f"blocks: {s.blocks_in}   fallbacks: {s.fallback_blocks}   "
                         f"xruns: {s.xruns}"))
         elif not self.enabled:
