@@ -17,6 +17,15 @@ toggling never clicks. Dry is delayed through its own FIFO in lockstep with
 the wet one (see _dry_out) so both always refer to the same original
 instant — mixing live dry against lagged wet sounded like an echo.
 
+Lockstep is necessary and not sufficient: it pairs the n-th input sample
+with the n-th *emitted* sample, and a processor's n-th emitted sample is
+made from an earlier input than that (50 ms earlier on dpdfnet_hr, and
+nothing like its declared latency — audio/lag.py). Both dry FIFOs are
+therefore padded by the measured lag once it is known: _dry_work for the
+mask the stereo rebuild derives, _dry_out for the mix the listener hears.
+Correcting only the first is what left the dry/wet blend 50 ms apart at
+every mix below 100 %.
+
 The wet path is mono end to end (the enhancers are mono speech models), so
 the processed signal used to be written to both output channels — measured
 in B1 as a total stereo collapse on 104/104 corpus pairs. StereoRebuild
@@ -106,6 +115,11 @@ class AudioEngine:
         self._stream = None
         self._worker = None
         self._levels: collections.deque = collections.deque(maxlen=64)
+        # Input RMS beside the output's. Without it a silent session and an
+        # idle one produce the same picture, and the one live defect the
+        # status line cannot name — a healthy stream with no sound — has no
+        # evidence to separate capture from mix from routing.
+        self._levels_in: collections.deque = collections.deque(maxlen=64)
         self._lag_ema = 0.0      # samples of pipeline delay, smoothed
         # How far the processor's output trails the dry it is paired with,
         # measured at stream start (audio/lag.py). Needed by the stereo
@@ -116,6 +130,14 @@ class AudioEngine:
         # Set by the off-thread measurement; the worker picks it up and does
         # the padding itself, so _dry_work is only ever touched by one thread.
         self._pending_lag: int | None = None
+        # Same hand-off for the mix path's copy of the dry stream, which is
+        # drained by the callback thread and so must be padded there.
+        self._mix_pad_pending: int | None = None
+        self._mix_pad = 0        # samples of lag correction sitting in _dry_out
+        # Set when the estimator ran out of usable windows. The lag is then
+        # unknown for the session: no correction is applied anywhere and the
+        # UI says so, rather than a wrong correction being applied quietly.
+        self._lag_given_up = False
         self._measuring = False
         self._midside = MidSideFilter()
         self._midside_enabled = False
@@ -212,13 +234,43 @@ class AudioEngine:
         user watching video wants (ROADMAP C7). Comparable to
         bench_quality.py's `latency_ms` column, which measures the same
         span by cross-correlation.
+
+        The alignment padding in _dry_out is subtracted back out. That pad
+        is bookkeeping — it never drains, and it delays which dry sample is
+        paired with which wet one rather than delaying the output — so
+        counting it would inflate this number by the processor's lag while
+        nothing a listener could measure had changed.
         """
-        return 1000.0 * self._lag_ema / SAMPLE_RATE
+        return 1000.0 * max(0.0, self._lag_ema - self._mix_pad) / SAMPLE_RATE
+
+    @property
+    def processor_lag_ms(self) -> float | None:
+        """How far the processor's output trails its input, in ms, or None
+        while it is still being measured or if it never could be."""
+        return None if self._mask_lag is None else 1000.0 * self._mask_lag / SAMPLE_RATE
+
+    @property
+    def lag_state(self) -> str:
+        """`measured`, `measuring`, or `unmeasured` — see audio/lag.py.
+
+        `unmeasured` is a real outcome, not an error: the correction is
+        skipped and the stereo rebuild stays bypassed, which is the same
+        audio as never having measured. It is surfaced because the
+        alternative — silently assuming zero — is what made the rebuild
+        sound doubled.
+        """
+        if self._mask_lag is not None:
+            return "measured"
+        return "unmeasured" if self._lag_given_up else "measuring"
 
     def recent_levels(self) -> list:
         """Copy of the most recent output RMS levels, oldest first — for a
         live waveform/level meter."""
         return list(self._levels)
+
+    def recent_input_levels(self) -> list:
+        """The same for the captured input, before any processing."""
+        return list(self._levels_in)
 
     @property
     def stream_ok(self) -> bool:
@@ -305,8 +357,12 @@ class AudioEngine:
         self._lag_est = LagEstimator(SAMPLE_RATE)
         self._mask_lag = None
         self._pending_lag = None
+        self._mix_pad_pending = None
+        self._mix_pad = 0
+        self._lag_given_up = False
         self._measuring = False
         self._levels.clear()
+        self._levels_in.clear()
         self._running = True
         self._worker = threading.Thread(target=self._work, daemon=True)
         self._worker.start()
@@ -345,6 +401,9 @@ class AudioEngine:
         self._lag_ema = 0.0
         self._mask_lag = None
         self._pending_lag = None
+        self._mix_pad_pending = None
+        self._mix_pad = 0
+        self._lag_given_up = False
         self._measuring = False
         self._wet_gain = 0.0
 
@@ -395,11 +454,26 @@ class AudioEngine:
             outdata[:] = indata
 
     def _callback_body(self, indata, outdata, frames) -> None:
+        # The measurement lands on the worker thread; the FIFO it corrects
+        # here belongs to this one. Delaying dry by the processor's lag is
+        # what makes the mix a blend rather than a blend with an echo in it
+        # — below 100 % the two sides were 50 ms apart on dpdfnet_hr.
+        # Costs one dry gap of that length, once, at stream start.
+        pad = self._mix_pad_pending
+        if pad is not None:
+            self._mix_pad_pending = None
+            if pad > 0:
+                self._dry_out = np.concatenate(
+                    [np.zeros((pad, 2), dtype=np.float32), self._dry_out])
+                self._mix_pad += pad
         try:
             self._in_q.put_nowait(indata.copy())
             self._dry_out = np.concatenate([self._dry_out, indata])
-            if len(self._dry_out) > self._max_out:
-                self._dry_out = self._dry_out[-self._max_out:]
+            # The cap grows by the alignment pad: trimming from the head is
+            # exactly what would throw the correction away again.
+            cap = self._max_out + self._mix_pad
+            if len(self._dry_out) > cap:
+                self._dry_out = self._dry_out[-cap:]
         except queue.Full:
             self.stats.overflows += 1
             # dropped this block from processing — skip it here too, so the
@@ -453,6 +527,7 @@ class AudioEngine:
         mixed = dry * dry_g * (1.0 - ramp) + wet * wet_g * ramp
         outdata[:] = _soft_limit(mixed) if wet_g > 1.0 else mixed
         self._levels.append(float(np.sqrt(np.mean(np.square(outdata)))))
+        self._levels_in.append(float(np.sqrt(np.mean(np.square(indata)))))
 
     def _work(self) -> None:
         while self._running:
@@ -538,12 +613,19 @@ class AudioEngine:
                 # of the FIFO is simply that much further behind.
                 pad = np.zeros((lag, 2), dtype=np.float32)
                 self._dry_work = np.concatenate([pad, self._dry_work])
+                # and the same correction for the stream the user hears
+                # below 100 % mix, applied on its own thread.
+                self._mix_pad_pending = lag
             return
         if self._measuring:
             return
         if self._lag_est.exhausted:
-            self._mask_lag = 0        # assume aligned; bounded, and no worse
-            return                    # than never having measured
+            # Unknown, not zero. Assuming zero applies a correction of the
+            # wrong size to both the mask and the mix; leaving it unknown
+            # applies none and keeps the rebuild bypassed, which is the
+            # audio you get without ever having measured. The UI reports it.
+            self._lag_given_up = True
+            return
         if not self._lag_est.push(dry_st.mean(axis=1), wet):
             return
 

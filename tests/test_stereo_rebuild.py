@@ -19,6 +19,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from assassin_live.audio.engine import BLOCK, AudioEngine  # noqa: E402
+from assassin_live.audio.lag import LagEstimator, _xcorr_lag  # noqa: E402
 from assassin_live.audio.stereo import HOP, N_FFT, StereoRebuild  # noqa: E402
 from assassin_live.processors.base import StreamProcessor  # noqa: E402
 
@@ -369,6 +370,158 @@ def test_measured_latency_tracks_the_extra_framing():
           f"{on_ms:.1f} - {off_ms:.1f} = {on_ms - off_ms:.1f} ms, expected ~{expect:.1f}")
 
 
+def test_a_quiet_intro_does_not_use_up_the_measurement():
+    """The estimator's failure mode, tested at the unit it lives in.
+
+    Silence cannot correlate. Counting it as a failed attempt meant a
+    session that started on a quiet intro could exhaust every window before
+    the first loud bar arrived, and the engine would then "assume aligned"
+    — the exact misalignment the module exists to remove, arrived at by
+    giving up rather than by measuring. Silent pairs are now dropped, so
+    only material that had an answer in it consumes an attempt.
+    """
+    print("\nquiet intro")
+    est = LagEstimator(SR)
+    quiet = np.zeros(BLOCK, dtype=np.float32)
+    for _ in range(int(SR * 20 / BLOCK)):          # 20 s of silence
+        est.push(quiet, quiet)
+    check("silence consumed no attempts", est.windows_taken == 0,
+          f"{est.windows_taken} taken, {est.silent_frames} frames dropped")
+    check("and the estimator has not given up", not est.exhausted)
+
+    dry = wide_stereo(n=int(SR * PUMP_S)).mean(axis=1)
+    wet = np.concatenate([np.zeros(_LaggedGate.LAG, dtype=np.float32),
+                          dry])[:len(dry)]
+    ready = False
+    for i in range(0, len(dry) - BLOCK + 1, BLOCK):
+        if est.push(dry[i:i + BLOCK], wet[i:i + BLOCK]):
+            ready = True
+            break
+    check("real audio still fills a window", ready)
+    lag = est.measure(*est.take_window()) if ready else None
+    check("and it measures the lag the silence would have hidden",
+          lag is not None and abs(lag - _LaggedGate.LAG) < 0.003 * SR,
+          f"{lag} samples, true {_LaggedGate.LAG}")
+
+
+def _emitted_lag(out: np.ndarray, ref: np.ndarray) -> int:
+    """How far the engine's output trails the input that produced it."""
+    lag, _ = _xcorr_lag(out[:, 0].astype(np.float64),
+                        ref[:, 0].astype(np.float64), int(0.25 * SR))
+    return lag
+
+
+def _pump_settled(eng: AudioEngine, dry: np.ndarray, tries: int = 4) -> tuple:
+    """Pump until the lag correction has landed, then pump once more and
+    return that.
+
+    How long the measurement takes is not deterministic: it needs a window
+    of audio, the correlation runs on its own thread, and a window whose
+    peak is not convincing is discarded for another. Measuring across the
+    moment it lands averages the corrected and uncorrected states together
+    and reports neither — so let it land first, then measure a run that is
+    entirely on one side of it. Engine state survives between pumps; only
+    start()/stop() clear it.
+    """
+    for _ in range(tries):
+        if eng._mix_pad:
+            break
+        _pump(eng, dry)
+    return _pump(eng, dry)
+
+
+def test_the_mix_is_aligned_with_a_processor_that_lags():
+    """The dry the listener hears must be as late as the wet it blends with.
+
+    B6 corrected the worker's dry copy, which feeds the stereo mask, and
+    left the callback's alone — so below 100 % mix the two sides of the
+    blend were the processor's lag apart, which is an echo rather than a
+    mix. Measured here the way the defect is heard: run the engine fully
+    dry and fully wet over the same input, and ask how late each stream
+    comes out. Before the fix these differ by the processor's lag.
+    """
+    print("\ndry/wet alignment below 100 % mix")
+    dry = wide_stereo(n=int(SR * PUMP_S))
+
+    eng_dry = AudioEngine(_LaggedGate())
+    eng_dry.set_intensity(0.0)
+    eng_dry._wet_gain = 0.0
+    out_dry, ref = _pump_settled(eng_dry, dry)
+
+    eng_wet = AudioEngine(_LaggedGate())
+    eng_wet.set_intensity(1.0)
+    eng_wet._wet_gain = 1.0
+    out_wet, ref_wet = _pump_settled(eng_wet, dry)
+
+    # Each engine is pumped by its own worker thread, and how many blocks
+    # pile up before that thread produces its first output varies run to
+    # run (the B7 race, in miniature). That queue backlog delays everything
+    # the engine emits, dry and wet alike — so comparing raw emitted lags
+    # across two runs would be comparing two different backlogs. Subtract
+    # each run's own, which is exactly what latency_ms reports now that the
+    # pad is excluded from it, and what is left is the quantity under test:
+    # how far behind its input each stream is *by design*.
+    def own_delay(eng, out, ref):
+        return _emitted_lag(out, ref) - eng.latency_ms / 1000.0 * SR
+
+    dry_delay, wet_delay = (own_delay(eng_dry, out_dry, ref),
+                            own_delay(eng_wet, out_wet, ref_wet))
+    skew_ms = abs(dry_delay - wet_delay) / SR * 1000.0
+    # Within the estimator's own tolerance, not exactly: the pad is
+    # whatever the correlation measured, and it measures to ~0.1 ms.
+    check("the lag correction reached the mix path",
+          abs(eng_dry._mix_pad - _LaggedGate.LAG) < 0.003 * SR,
+          f"padded {eng_dry._mix_pad} samples, processor lag {_LaggedGate.LAG}")
+    check("dry and wet are the same distance behind the input", skew_ms < 5.0,
+          f"dry {dry_delay:.0f} samples, wet {wet_delay:.0f}, "
+          f"skew {skew_ms:.1f} ms")
+    # The pad is bookkeeping in a FIFO, not delay anyone hears: it changes
+    # which dry sample is paired with which wet one, not when either leaves.
+    # Counting it would inflate C7's number by the model's lag while nothing
+    # audible had changed (ROADMAP C4/C7).
+    raw_ms = 1000.0 * eng_dry._lag_ema / SR
+    pad_ms = 1000.0 * eng_dry._mix_pad / SR
+    check("and the reported latency excludes the pad",
+          abs(raw_ms - pad_ms - eng_dry.latency_ms) < 1.0,
+          f"FIFO {raw_ms:.1f} ms - pad {pad_ms:.1f} ms, "
+          f"reported {eng_dry.latency_ms:.1f} ms")
+
+
+def test_an_unmeasurable_lag_is_reported_rather_than_assumed():
+    """Uncorrelated input used to end in `_mask_lag = 0` — a correction of
+    the wrong size, applied silently. It now ends in `unmeasured`: no
+    correction anywhere, the rebuild left bypassed, and a state the UI can
+    show."""
+    print("\nunmeasurable lag")
+    eng = AudioEngine(_Gate())
+    eng._lag_est = LagEstimator(SR, max_windows=0)   # nothing will be measured
+    eng.set_stereo(True)
+    eng.set_intensity(1.0)
+    eng._wet_gain = 1.0
+    out, ref = _pump(eng, wide_stereo(n=int(SR * PUMP_S)))
+    check("state is unmeasured, not a lag of zero",
+          eng.lag_state == "unmeasured" and eng._mask_lag is None,
+          f"state {eng.lag_state!r}, mask lag {eng._mask_lag!r}")
+    check("nothing was padded", eng._mix_pad == 0)
+    width = _db(_side(out[2 * len(out) // 3:]), _side(ref[2 * len(ref) // 3:]))
+    check("the rebuild stayed bypassed rather than running misaligned",
+          width < -40.0, f"{width:.1f} dB side retained")
+
+
+def test_the_input_is_metered_too():
+    """W3: one meter cannot tell a silent session from an idle one."""
+    print("\ninput metering")
+    eng = AudioEngine(_Gate())
+    eng.set_intensity(1.0)
+    eng._wet_gain = 1.0
+    _pump(eng, wide_stereo(n=int(SR * PUMP_S)))
+    lin, lout = eng.recent_input_levels(), eng.recent_levels()
+    check("input levels recorded", len(lin) > 0 and max(lin) > 0.01,
+          f"{len(lin)} samples, peak {max(lin or [0]):.3f}")
+    check("output levels still recorded", len(lout) > 0 and max(lout) > 0.01,
+          f"{len(lout)} samples, peak {max(lout or [0]):.3f}")
+
+
 def test_rebuild_aligns_to_a_processor_that_lags():
     """The regression test for the doubling bug. A model whose output trails
     its input by 50 ms must still get an image rebuilt from the RIGHT audio;
@@ -404,6 +557,10 @@ def main() -> int:
     test_wants_stereo_processor_bypasses_the_rebuild()
     test_measured_latency_tracks_the_extra_framing()
     test_rebuild_aligns_to_a_processor_that_lags()
+    test_a_quiet_intro_does_not_use_up_the_measurement()
+    test_the_mix_is_aligned_with_a_processor_that_lags()
+    test_an_unmeasurable_lag_is_reported_rather_than_assumed()
+    test_the_input_is_metered_too()
     print(f"\n{'FAIL' if FAILURES else 'PASS'}"
           + (f" — {len(FAILURES)}: {', '.join(FAILURES)}" if FAILURES else ""))
     return 1 if FAILURES else 0

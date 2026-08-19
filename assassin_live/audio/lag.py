@@ -39,6 +39,14 @@ import numpy as np
 # a permanent misalignment — worse than not correcting at all.
 CONFIDENCE = 0.05
 
+# A pair of windows is only evidence if both signals in it carry some. Near
+# silence correlates with nothing, and a session that starts on a quiet intro
+# used to spend all `max_windows` of its attempts on that silence and give up
+# before the first loud bar arrived — leaving the caller to "assume aligned",
+# which is the failure this module exists to prevent. Silence is an absent
+# measurement, not a failed one, so it does not consume an attempt.
+SILENCE_RMS = 1e-4        # about -80 dBFS
+
 # Known limit, found while testing: on strictly periodic content the peak at
 # the true lag and the one at an integer number of periods are nearly equal,
 # and confidence does not distinguish them — a synthetic 220 Hz tone with a
@@ -68,22 +76,39 @@ class LagEstimator:
         self.max_lag = int(max_lag_ms / 1000.0 * sample_rate)
         self.max_windows = max_windows
         self.windows_taken = 0
+        self.silent_frames = 0   # dropped by push(); diagnostic only
         self._dry: list = []
         self._wet: list = []
         self._n = 0
 
     @property
     def exhausted(self) -> bool:
-        """Give up rather than buffer for ever on silent or uncorrelated
-        input. Callers treat this as "assume aligned"."""
+        """Give up rather than buffer for ever on uncorrelated input.
+
+        Callers treat this as *unmeasured* — not as "assume aligned". The
+        two are not the same answer: assuming zero applies a correction of
+        the wrong size, while unmeasured means applying none and saying so.
+        Only windows that carried signal count toward this (see push), so
+        reaching it means `max_windows` genuine attempts have failed.
+        """
         return self.windows_taken >= self.max_windows
 
     def push(self, dry, wet) -> bool:
-        """Returns True when a full window is ready to be measured."""
+        """Returns True when a full window is ready to be measured.
+
+        Near-silent pairs are dropped rather than buffered: they cannot
+        correlate, and letting them fill a window spends an attempt on
+        material that never had an answer in it.
+        """
         n = min(len(dry), len(wet))
         if n:
-            self._dry.append(np.asarray(dry[:n], dtype=np.float32))
-            self._wet.append(np.asarray(wet[:n], dtype=np.float32))
+            d = np.asarray(dry[:n], dtype=np.float32)
+            w = np.asarray(wet[:n], dtype=np.float32)
+            if _rms(d) < SILENCE_RMS or _rms(w) < SILENCE_RMS:
+                self.silent_frames += n
+                return self._n >= self.window
+            self._dry.append(d)
+            self._wet.append(w)
             self._n += n
         return self._n >= self.window
 
@@ -105,6 +130,10 @@ class LagEstimator:
         if confidence >= CONFIDENCE and lag >= 0:
             return lag
         return None
+
+
+def _rms(x: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(np.square(x, dtype=np.float64)))) if len(x) else 0.0
 
 
 def _xcorr_lag(y: np.ndarray, x: np.ndarray, max_lag: int) -> tuple:

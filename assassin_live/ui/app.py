@@ -10,6 +10,7 @@ when the output device changes (Bluetooth headset reconnects etc.).
 """
 
 import json
+import math
 import os
 import sys
 import threading
@@ -33,9 +34,13 @@ AMBER = "#e0a458"
 ON_COLOR = "#2ecc71"
 OFF_COLOR = "#3a3d45"
 
+METER_IN = "#4a4a58"     # captured signal: present, but not the point
+
 WAVE_BARS = 42
 WAVE_WIDTH = 380
 WAVE_HEIGHT = 68
+WAVE_GUTTER = 24         # room for the in/out labels
+WAVE_ROW = 28            # bar height available to each row
 
 
 def _icon_path() -> Path:
@@ -600,6 +605,32 @@ class App:
             self.details.pack_forget()
             self.details_btn.config(text="details ▸")
 
+    def _lag_text(self) -> str:
+        """What the lag measurement has to say, including when it has
+        nothing. `unmeasured` is not an error and not zero — it means no
+        correction was applied and the stereo rebuild stayed bypassed, which
+        is worth seeing, because assuming zero instead is what made the
+        rebuild sound doubled (ROADMAP B6)."""
+        if self.engine is None:
+            return "—"
+        state = self.engine.lag_state
+        if state == "measured":
+            return f"{self.engine.processor_lag_ms:.1f} ms"
+        if state == "unmeasured":
+            return "unmeasured (rebuild bypassed)"
+        return "measuring…"
+
+    @staticmethod
+    def _level_db(levels: list) -> str:
+        """Most recent RMS as dBFS. Silence reads as a floor, not as
+        -inf — the distinction being made here is signal vs none."""
+        if not levels:
+            return "—"
+        rms = levels[-1]
+        if rms < 1e-5:
+            return "silent"
+        return f"{20.0 * math.log10(rms):.1f} dB"
+
     def _health(self, stats) -> tuple:
         """(word, colour) for the status line — what a user needs to know
         about whether this is working, in one word."""
@@ -683,23 +714,42 @@ class App:
         self._result = None
         self._paint_button("off")
 
-    # -- live waveform meter -----------------------------------------------------
+    # -- live level meters -------------------------------------------------------
+    @staticmethod
+    def _padded(levels: list) -> list:
+        """Right-aligned to the bar count, so the trace scrolls in from the
+        right instead of stretching to fit."""
+        if len(levels) < WAVE_BARS:
+            return [0.0] * (WAVE_BARS - len(levels)) + levels
+        return levels[-WAVE_BARS:]
+
     def _wave_tick(self):
+        """Two rows, not one: what we captured above what we emitted.
+
+        The output row alone cannot tell a silent session from an idle one,
+        which is the whole difficulty with the "sometimes no audio at all"
+        report — every other failure names itself in the status line. With
+        both rows the three candidates separate on sight: input moving and
+        output flat is the engine or the mix, both flat is capture, and both
+        moving with nothing audible is routing past our output.
+        """
         c = self.wave_canvas
         c.delete("all")
-        levels = self.engine.recent_levels() if self.engine else []
-        if len(levels) < WAVE_BARS:
-            levels = [0.0] * (WAVE_BARS - len(levels)) + levels
-        else:
-            levels = levels[-WAVE_BARS:]
+        rows = (("in", self.engine.recent_input_levels() if self.engine else [],
+                 METER_IN, WAVE_ROW + 4),
+                ("out", self.engine.recent_levels() if self.engine else [],
+                 RED, WAVE_HEIGHT - 2))
         gap = 3
-        bar_w = max(1.0, (WAVE_WIDTH - gap * (WAVE_BARS + 1)) / WAVE_BARS)
-        cy = WAVE_HEIGHT / 2
-        for i, lvl in enumerate(levels):
-            bar_h = min(WAVE_HEIGHT - 6, max(2.0, lvl * WAVE_HEIGHT * 6))
-            x0 = gap + i * (bar_w + gap)
-            c.create_rectangle(x0, cy - bar_h / 2, x0 + bar_w, cy + bar_h / 2,
-                               fill=RED, outline="")
+        span = WAVE_WIDTH - WAVE_GUTTER
+        bar_w = max(1.0, (span - gap * (WAVE_BARS + 1)) / WAVE_BARS)
+        for label, levels, colour, base in rows:
+            c.create_text(2, base - WAVE_ROW / 2, text=label, anchor="w",
+                          font=("Mono", 7), fill=SUBTEXT)
+            for i, lvl in enumerate(self._padded(levels)):
+                bar_h = min(WAVE_ROW, max(1.5, lvl * WAVE_ROW * 6))
+                x0 = WAVE_GUTTER + gap + i * (bar_w + gap)
+                c.create_rectangle(x0, base - bar_h, x0 + bar_w, base,
+                                   fill=colour, outline="")
         self.root.after(90, self._wave_tick)
 
     # -- supervision -------------------------------------------------------------
@@ -791,15 +841,14 @@ class App:
                     # that is wrong the symptom is doubled, smeared audio,
                     # and without a readout there is nothing to report but
                     # the symptom.
-                    lag = self.engine._mask_lag
-                    lag_txt = ("measuring…" if lag is None
-                               else f"{lag / 48000 * 1000:.1f} ms")
                     self.details.config(text=(
                         f"model: {self.model.get()}  "
                         f"{s.worker_ms_avg:.1f} ms/block (20 ms budget)\n"
-                        f"processor lag: {lag_txt}   "
+                        f"processor lag: {self._lag_text()}   "
                         f"stereo: {'on' if self.stereo_enabled else 'off'}   "
                         f"mix: {round(self.mix_pct)}%\n"
+                        f"in {self._level_db(self.engine.recent_input_levels())}   "
+                        f"out {self._level_db(self.engine.recent_levels())}\n"
                         f"blocks: {s.blocks_in}   fallbacks: {s.fallback_blocks}   "
                         f"xruns: {s.xruns}"))
         elif not self.enabled:

@@ -39,8 +39,10 @@ class Stats:
 
 
 class Engine:
-    def __init__(self, stream_ok=True):
+    def __init__(self, stream_ok=True, lag_state="measured", lag_ms=50.0):
         self.stream_ok = stream_ok
+        self.lag_state = lag_state
+        self.processor_lag_ms = lag_ms
 
 
 def app(prev_fallbacks=0, prev_xruns=0, stream_ok=True, engine=True):
@@ -48,6 +50,42 @@ def app(prev_fallbacks=0, prev_xruns=0, stream_ok=True, engine=True):
     a.engine = Engine(stream_ok) if engine else None
     a._prev_fallbacks, a._prev_xruns = prev_fallbacks, prev_xruns
     return a
+
+
+def test_the_lag_readout_distinguishes_its_three_states():
+    """`unmeasured` and a measured zero used to be the same reading, which
+    is why the doubling report could not say which had happened (ROADMAP
+    B6b). They are different answers and the panel now says which."""
+    print("\nprocessor lag readout")
+    a = app()
+    check("a measurement reads as one", a._lag_text() == "50.0 ms", a._lag_text())
+
+    a.engine = Engine(lag_state="measuring")
+    check("still deciding says so", "measuring" in a._lag_text(), a._lag_text())
+
+    a.engine = Engine(lag_state="unmeasured", lag_ms=None)
+    txt = a._lag_text()
+    check("giving up is not reported as a lag of zero",
+          "unmeasured" in txt and "0" not in txt, txt)
+    check("and says what that cost", "bypassed" in txt, txt)
+
+    a.engine = None
+    check("no engine, no claim", a._lag_text() == "—", a._lag_text())
+
+
+def test_levels_read_as_dbfs():
+    """C10's two rows are only useful if the numbers under them are, and the
+    distinction being drawn is signal vs none — so silence gets a word, not
+    a -inf."""
+    print("\nlevel readout")
+    check("no data yet", App._level_db([]) == "—", App._level_db([]))
+    check("silence is named", App._level_db([0.0]) == "silent", App._level_db([0.0]))
+    check("full scale is 0 dB", App._level_db([1.0]).startswith("0.0"),
+          App._level_db([1.0]))
+    half = App._level_db([0.5])
+    check("half scale is about -6 dB", half.startswith("-6.0"), half)
+    check("the most recent value wins", App._level_db([1.0, 0.5]) == half,
+          App._level_db([1.0, 0.5]))
 
 
 def test_healthy():
@@ -99,6 +137,8 @@ def main() -> int:
     test_a_dead_stream_outranks_everything()
     test_falling_back_to_dry_is_not_healthy()
     test_counters_are_deltas_not_totals()
+    test_the_lag_readout_distinguishes_its_three_states()
+    test_levels_read_as_dbfs()
     print(f"\n{'FAIL' if FAILURES else 'PASS'}"
           + (f" — {len(FAILURES)}: {', '.join(FAILURES)}" if FAILURES else ""))
     return 1 if FAILURES else 0
