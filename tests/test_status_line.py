@@ -88,6 +88,47 @@ def test_levels_read_as_dbfs():
           App._level_db([1.0, 0.5]))
 
 
+def test_the_status_bar_line_keeps_its_numbers():
+    """C11 moved this line into a bar with a fixed width, so the device name
+    is the part that has to give — "Family 17h/19h HD Audio Controller
+    Analog Stereo" would otherwise push the latency and the lag off the end,
+    which are the two numbers the line exists to carry."""
+    print("\nstatus bar line")
+    line = App.format_status("healthy", "Built-in Audio Analog Stereo", 50.0,
+                             "50.0 ms")
+    check("health first", line.startswith("healthy"), line)
+    check("keeps both numbers", "50 ms" in line and "lag 50.0 ms" in line, line)
+    check("long device names are truncated, not dropped",
+          "…" in line and "Built-in Audio" in line, line)
+
+    short = App.format_status("healthy", "HDMI", 20.0, "measuring…")
+    check("a short name is left alone", "…" not in short.split("·")[1], short)
+
+
+def test_the_details_block_is_scannable():
+    """The counters are read when something is wrong, which is the worst
+    moment to make someone parse `key: value  key: value` (ROADMAP C4)."""
+    print("\ndetails block")
+    text = App.format_details((("model", "dpdfnet_hr"), ("xruns", 0)))
+    lines = text.split("\n")
+    check("one row per line", len(lines) == 2, repr(text))
+    check("values line up",
+          lines[0].index("dpdfnet_hr") == lines[1].index("0"),
+          repr(lines))
+
+
+def test_the_boost_readout_matches_the_fader():
+    """Past 100 % the fader raises wet gain as well as the mix, and until now
+    nothing said by how much."""
+    print("\nwet boost readout")
+    check("unity below 100 %", App._boost_label(100.0) == "boost +0.0 dB",
+          App._boost_label(100.0))
+    at300 = App._boost_label(300.0)
+    check("3x reads as +9.5 dB", at300.startswith("boost +9.5"), at300)
+    check("halfway up reads between", App._boost_label(200.0).startswith("boost +6.0"),
+          App._boost_label(200.0))
+
+
 def test_healthy():
     print("\nnothing wrong")
     word, colour = app()._health(Stats())
@@ -139,6 +180,9 @@ def main() -> int:
     test_counters_are_deltas_not_totals()
     test_the_lag_readout_distinguishes_its_three_states()
     test_levels_read_as_dbfs()
+    test_the_status_bar_line_keeps_its_numbers()
+    test_the_details_block_is_scannable()
+    test_the_boost_readout_matches_the_fader()
     print(f"\n{'FAIL' if FAILURES else 'PASS'}"
           + (f" — {len(FAILURES)}: {', '.join(FAILURES)}" if FAILURES else ""))
     return 1 if FAILURES else 0
