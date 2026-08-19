@@ -37,6 +37,7 @@ import numpy as np
 from ..processors.base import StreamProcessor
 from .backends.base import RoutingBackend
 from .bandlimit import BandlimitFilter
+from .lag import LagEstimator
 from .midside import MidSideFilter
 from .stereo import StereoRebuild
 
@@ -72,6 +73,7 @@ class EngineStats:
         self.worker_ms_avg = 0.0
         self.xruns = 0
         self.callback_errors = 0   # exception in _callback -> would silently kill the stream
+        self.backlog_trimmed = 0   # samples dropped once to correct a startup stall
 
 
 class AudioEngine:
@@ -105,6 +107,16 @@ class AudioEngine:
         self._worker = None
         self._levels: collections.deque = collections.deque(maxlen=64)
         self._lag_ema = 0.0      # samples of pipeline delay, smoothed
+        # How far the processor's output trails the dry it is paired with,
+        # measured at stream start (audio/lag.py). Needed by the stereo
+        # rebuild, which is bypassed until it is known, and by the backlog
+        # correction below.
+        self._lag_est = LagEstimator(SAMPLE_RATE)
+        self._mask_lag: int | None = None
+        # Set by the off-thread measurement; the worker picks it up and does
+        # the padding itself, so _dry_work is only ever touched by one thread.
+        self._pending_lag: int | None = None
+        self._measuring = False
         self._midside = MidSideFilter()
         self._midside_enabled = False
         self._stereo = StereoRebuild()
@@ -130,6 +142,30 @@ class AudioEngine:
         # bound how much processed audio may pile up before we drop old
         # samples (keeps wet path from drifting seconds behind live audio)
         self._max_out = BLOCK * 8
+
+    def _warm_up(self, seconds: float = 0.5) -> None:
+        """Run silence through the processor so the first real block meets a
+        hot runtime. Errors are swallowed: a processor that dislikes being
+        warmed must not stop the stream from opening."""
+        proc, down, up = self._runtime
+        n = int(SAMPLE_RATE * seconds)
+        try:
+            if proc.wants_stereo:
+                x = np.zeros((n, 2), dtype=np.float32)
+            else:
+                x = np.zeros(n, dtype=np.float32)
+            if down is not None:
+                x = down.resample_chunk(x)
+            y = proc.feed(x)
+            if up is not None and len(y):
+                up.resample_chunk(y)
+        except Exception:  # noqa: BLE001 — see docstring
+            pass
+        finally:
+            proc.reset()
+            if down is not None or up is not None:
+                # the resamplers now hold silence; rebuild them clean
+                self._runtime = self._build_runtime(proc)
 
     @staticmethod
     def _build_runtime(processor: StreamProcessor):
@@ -251,12 +287,25 @@ class AudioEngine:
         capture_dev, playback_dev = self._backend.resolve_stream_devices(
             monitor_source, sink_name)
 
+        # Warm the processor BEFORE the stream exists. The first inference
+        # after load is slow — measured at 26 blocks (~0.5 s) for
+        # dpdfnet_hr against 1 block once hot — and anything the callback
+        # sees during that time piles up in the dry FIFO, whose depth then
+        # IS the session's latency. Cold start was baking in 140 ms of
+        # permanent delay instead of 20 ms, varying run to run with
+        # scheduling. Paying it here costs a moment on the button, which is
+        # now a state the button can show.
+        self._warm_up()
         self.proc.reset()
         self._midside.reset()
         self._bandlimit.reset()
         self._bandlimit_r.reset()
         self._stereo.reset()
         self._dry_work = np.zeros((0, 2), dtype=np.float32)
+        self._lag_est = LagEstimator(SAMPLE_RATE)
+        self._mask_lag = None
+        self._pending_lag = None
+        self._measuring = False
         self._levels.clear()
         self._running = True
         self._worker = threading.Thread(target=self._work, daemon=True)
@@ -294,6 +343,9 @@ class AudioEngine:
         self._dry_out = np.zeros((0, 2), dtype=np.float32)
         self._dry_work = np.zeros((0, 2), dtype=np.float32)
         self._lag_ema = 0.0
+        self._mask_lag = None
+        self._pending_lag = None
+        self._measuring = False
         self._wet_gain = 0.0
 
     def retarget(self, monitor_source: str, sink_name: str) -> None:
@@ -449,14 +501,65 @@ class AudioEngine:
         if len(y) == 0:
             return _EMPTY_STEREO
 
-        # The dry pair for exactly the samples the model just emitted: same
-        # lockstep as _dry_out/_out in the callback, so this is the instant
-        # the model saw, not whatever is live now.
         n = min(len(y), len(self._dry_work))
         dry_st, self._dry_work = self._dry_work[:n], self._dry_work[n:]
-        if not self._stereo_enabled or n == 0:
+        if n == 0:
+            return np.repeat(y[:, None], 2, axis=1)
+
+        # FIFO position alone does NOT align these. The processor's output
+        # trails the input it is paired with — by 50 ms for dpdfnet_hr, and
+        # by nothing like its nominal latency_samples (audio/lag.py). Shaping
+        # the dry pair with a mask measured 50 ms away from it is what made
+        # the stereo rebuild sound doubled and out of sync when it shipped.
+        if self._mask_lag is None:
+            self._collect_lag(dry_st, y[:n])
+            # Until it is known the rebuild stays bypassed rather than
+            # running misaligned — a wrong image is worse than none.
+            return np.repeat(y[:, None], 2, axis=1)
+
+        if not self._stereo_enabled:
             return np.repeat(y[:, None], 2, axis=1)
         return self._stereo.process(dry_st, y[:n])
+
+    def _collect_lag(self, dry_st: np.ndarray, wet: np.ndarray) -> None:
+        """Gather windows for the lag measurement and apply the answer.
+
+        Correlation runs on its own thread — it costs 5-12 ms, and spending
+        that here empties the wet FIFO and inflates the dry backlog, which
+        is permanent latency (audio/lag.py). Only this thread ever mutates
+        _dry_work, so the answer is applied here rather than by the measurer.
+        """
+        if self._pending_lag is not None:
+            lag, self._pending_lag = self._pending_lag, None
+            self._mask_lag = lag
+            if lag:
+                # Delaying the dry stream by the lag makes every later
+                # pairing correct with no per-sample bookkeeping: the head
+                # of the FIFO is simply that much further behind.
+                pad = np.zeros((lag, 2), dtype=np.float32)
+                self._dry_work = np.concatenate([pad, self._dry_work])
+            return
+        if self._measuring:
+            return
+        if self._lag_est.exhausted:
+            self._mask_lag = 0        # assume aligned; bounded, and no worse
+            return                    # than never having measured
+        if not self._lag_est.push(dry_st.mean(axis=1), wet):
+            return
+
+        d, w = self._lag_est.take_window()
+        self._measuring = True
+
+        def run():
+            try:
+                lag = self._lag_est.measure(d, w)
+            except Exception:  # noqa: BLE001 — a failed measurement just
+                lag = None     # means another window, never a dead stream
+            if lag is not None:
+                self._pending_lag = lag
+            self._measuring = False
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _wet_stereo_proc(self, proc, down, up, block) -> np.ndarray:
         """A processor that consumes the stereo pair itself (ROADMAP A1).

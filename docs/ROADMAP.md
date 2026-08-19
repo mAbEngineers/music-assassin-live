@@ -1026,6 +1026,95 @@ every time is the only thing that stays true as more are added.
 `object.__new__` because constructing the real app builds widgets and takes
 over a display.
 
+### B6. The stereo rebuild's mask was 50 ms out of step ✅ fixed 2026-08-19
+
+**Reported by ear:** "the preserve stereo image option gives like double
+audio and it feels very out of sync." Correct, and worse than it sounds.
+
+`StereoRebuild` derives a mask from wet-vs-dry and applies it to the dry
+pair, which only means anything if the two refer to the same instant. The
+engine paired them by FIFO position, assuming a processor emits `output[k]`
+as the processed `input[k]`. Measured against the shipped models on real
+corpus audio:
+
+| model | nominal `latency_ms` | **measured lag** |
+|---|---|---|
+| `dpdfnet_hr` | 10.0 ms | **50.0 ms** |
+| `dtln` | 24.0 ms | 8.0 ms |
+| `gtcrn` | 16.0 ms | 5.3 ms |
+
+Constant per model, and matching `latency_samples` for **none** of them — in
+both directions. So the mask described a moment 50 ms away from the audio it
+shaped, on the default model. That is the doubling.
+
+**Fixed** by measuring the lag at stream start (`audio/lag.py`) and delaying
+the dry stream by it — padding the worker's dry FIFO by `lag` frames makes
+every later pairing correct with no per-sample bookkeeping. The rebuild stays
+bypassed until the measurement lands, because a wrong image is worse than
+none.
+
+**Two things this got wrong first, both worth keeping:**
+
+*The correlation cannot run on the inference worker.* It costs 5–12 ms, and
+spending that there empties the wet FIFO, so the callback falls back to dry
+and the dry backlog grows — permanent latency, i.e. the exact defect B7 below
+is about. Measured while getting it wrong: the pipeline floor went 20 ms →
+60 ms. It runs on its own thread now, and only the worker touches `_dry_work`.
+
+*Periodic content fools it.* A synthetic 220 Hz tone with a true lag of 2400
+samples reported 0 at confidence 0.46, because 2400 is ~11 periods of 220 Hz
+and the confidence check cannot tell those apart. Real audio has broadband
+aperiodic content and does not do this (0.81 on a corpus clip) — but it means
+a tone-only test signal silently verifies nothing.
+
+**Why nothing caught this before it shipped.** Every separation metric runs on
+the mono wet signal, which never passes through the rebuild; `stereo_width_db`
+counts side-channel *energy*, and a misaligned mask restores energy perfectly
+well. The B3 sweep's "free on every metric across 104 pairs" was therefore
+consistent with a badly broken feature. The `--dump-audio` files are the mono
+mix, so listening to those could not have shown it either. And the engine
+tests used a fake processor with **zero** lag, so FIFO pairing was trivially
+correct — the integration was tested with the one processor incapable of
+exhibiting the bug. `tests/test_stereo_rebuild.py` now has `_LaggedGate`,
+which trails its input by 2400 samples like the real thing.
+
+### B7. Startup baked a random latency into the whole session ✅ fixed 2026-08-19
+
+**Reported by ear:** "sometimes the audio doesn't play when run from idle or
+maybe it starts late so demusiced audio becomes out of sync."
+
+At startup `_out` is empty, so the callback emits live dry and does not drain
+`_dry_out`, which grows one block per callback. Whatever piles up before the
+worker's first output *is* the steady-state latency from then on, because
+both FIFOs drain at the same rate afterwards. Measured over six runs:
+
+| run | first wet output | dry backlog | steady latency |
+|---|---|---|---|
+| cold | **26 blocks** | 6720 samples | **140.0 ms** |
+| warm ×5 | 1 block | 960 samples | **20.0 ms** |
+
+The first inference after load is slow — ONNX warm-up — and that half second
+became 140 ms of permanent delay, varying run to run with scheduling, capped
+only by `_max_out` at 160 ms.
+
+**Fixed** by warming the processor inside `start()` before the stream opens,
+so the first real block meets a hot runtime. It costs a moment on the button,
+which is now a state the button can show (C9).
+
+**A backlog trim was tried and removed.** Forcing the dry FIFO to
+`mask_lag + one block` looked right and was wrong: the target has to account
+for the stereo rebuild's own framing when enabled, and getting it wrong
+misaligns the dry/wet mix. Warming removes the cause; a cap is a separate
+change that needs its own measurement.
+
+**Found while investigating, not yet fixed:** the dry/wet mix does not
+compensate for the processor's internal lag at all. `_dry_out` only absorbs
+what the model holds back, and `dpdfnet_hr` holds back nothing while
+delaying internally by 50 ms — so at any mix below 100 % the dry is 50 ms out
+of step with the wet. The machinery to fix it now exists (delay `_dry_out` by
+`mask_lag` the same way `_dry_work` is delayed); it is a separate change and
+wants its own by-ear check.
+
 ### C9. The ON/OFF button had no in-progress state ✅ done 2026-08-19
 
 **Reported by ear, 2026-08-19:** "when the on/off button is pressed it takes

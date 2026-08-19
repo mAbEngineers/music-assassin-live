@@ -64,14 +64,30 @@ def wide_stereo(n: int = SR, seed: int = 0) -> np.ndarray:
     """
     rng = np.random.default_rng(seed)
     t = np.arange(n) / SR
+    # A slow envelope and audible noise, because the lag estimator that now
+    # gates the rebuild works by cross-correlation and stationary tones give
+    # it a periodic, ambiguous peak. Real audio is never stationary; a test
+    # signal that is would only prove the estimator works on nothing.
+    env = 0.55 + 0.45 * np.sin(2 * np.pi * 0.9 * t)
     center = 0.4 * np.sin(2 * np.pi * 220 * t)
     kept_l = 0.3 * np.sin(2 * np.pi * 300 * t)     # panned, below the cutoff
     kept_r = 0.3 * np.sin(2 * np.pi * 500 * t)
     cut_l = 0.3 * np.sin(2 * np.pi * 1400 * t)     # panned, above it
     cut_r = 0.3 * np.sin(2 * np.pi * 3100 * t)
-    noise = 0.01 * rng.standard_normal(n)
-    return np.stack([center + kept_l + cut_l + noise,
-                     center + kept_r + cut_r + noise],
+    # Aperiodic content BELOW the fake model's 800 Hz cutoff. Without it the
+    # only thing surviving into the wet path is steady tones, and a lag of
+    # 2400 samples is ~11 periods of 220 Hz — so lag 0 and the true lag
+    # correlate almost equally and the estimator picks the wrong one. Real
+    # music has broadband low-frequency content and does not have this
+    # problem (measured: confidence 0.81 on a real corpus clip), but a test
+    # signal made only of tones would quietly test the wrong thing.
+    lf = rng.standard_normal(n)
+    k = 80                                     # crude low-pass, ~300 Hz
+    lf = np.convolve(lf, np.ones(k) / k, mode="same")
+    lf = 0.25 * lf / (np.abs(lf).max() + 1e-9)
+    noise = 0.05 * rng.standard_normal(n)
+    return np.stack([(center + kept_l + cut_l) * env + lf + noise,
+                     (center + kept_r + cut_r) * env + lf + noise],
                     axis=1).astype(np.float32)
 
 
@@ -151,7 +167,7 @@ def test_streaming_consistency():
     round number of hops — same guarantee test_processors_offline.py makes
     of the processors themselves."""
     print("\nstreaming consistency")
-    dry = wide_stereo(n=SR // 2)
+    dry = wide_stereo(n=int(SR * PUMP_S))
     wet = dry.mean(axis=1)
     even, odd = stream(dry, wet, chunk=960), stream(dry, wet, chunk=137)
     n = min(len(even), len(odd))
@@ -182,6 +198,31 @@ class _Gate(StreamProcessor):
         return np.fft.irfft(spec, n=len(x)).astype(np.float32)
 
 
+class _LaggedGate(_Gate):
+    """Same gate, but its output trails its input — like every real model.
+
+    THE point of this class: the shipped misalignment survived testing
+    because the only fake processor had zero lag, so pairing by FIFO
+    position was trivially correct. A processor that cannot exhibit the bug
+    cannot catch it.
+    """
+
+    name = "lagged_gate"
+    LAG = 2400          # 50 ms at 48 kHz — what dpdfnet_hr actually measures
+
+    def __init__(self):
+        self._tail = np.zeros(self.LAG, dtype=np.float32)
+
+    def reset(self) -> None:
+        self._tail = np.zeros(self.LAG, dtype=np.float32)
+
+    def feed(self, x: np.ndarray) -> np.ndarray:
+        y = _Gate.feed(self, x)
+        buf = np.concatenate([self._tail, y])
+        self._tail = buf[len(y):]
+        return buf[:len(y)]
+
+
 class _StereoProc(_Gate):
     """A wants_stereo processor — the A1 seam. Nothing shipped sets this."""
 
@@ -193,6 +234,7 @@ class _StereoProc(_Gate):
 
 
 WARMUP_BLOCKS = 6
+PUMP_S = 3.0          # must exceed the lag estimator's window
 
 
 def _pump(eng: AudioEngine, dry: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -237,7 +279,7 @@ def test_engine_emits_a_stereo_wet_signal():
     produces a stereo image when the rebuild is on, and dual-mono when it is
     off (the pre-B3 behaviour, kept as the default until swept)."""
     print("\nengine wet path")
-    dry = wide_stereo(n=SR // 2)
+    dry = wide_stereo(n=int(SR * PUMP_S))
 
     eng = AudioEngine(_Gate())
     eng.set_intensity(1.0)
@@ -250,7 +292,15 @@ def test_engine_emits_a_stereo_wet_signal():
     eng2.set_stereo(True)
     on, ref_on = _pump(eng2, dry)
 
-    w_off, w_on = _db(_side(off), _side(ref)), _db(_side(on), _side(ref_on))
+    # Measure over the final third only. The rebuild is deliberately
+    # bypassed until the lag measurement completes (~1.5 s), so averaging
+    # side energy across the whole pump reports roughly half of it and says
+    # more about the warm-up than about the rebuild.
+    def tail(a):
+        return a[2 * len(a) // 3:]
+
+    w_off, w_on = (_db(_side(tail(off)), _side(tail(ref))),
+                   _db(_side(tail(on)), _side(tail(ref_on))))
     check("engine default is still the measured-mono behaviour",
           w_off < -40.0, f"{w_off:.1f} dB side retained")
     # Not 0 dB, and should not be: half this signal's width lives in the
@@ -266,7 +316,7 @@ def test_wants_stereo_processor_bypasses_the_rebuild():
     """The A1 seam: a stereo-native processor is handed the pair directly and
     its output is used as-is."""
     print("\nwants_stereo seam")
-    dry = wide_stereo(n=SR // 2)
+    dry = wide_stereo(n=int(SR * PUMP_S))
     proc = _StereoProc()
     eng = AudioEngine(proc)
     eng.set_intensity(1.0)
@@ -288,7 +338,7 @@ def test_measured_latency_tracks_the_extra_framing():
     is a known, exact quantity, so it makes a good ruler: turning it on must
     move the reported latency by that much and nothing else changes."""
     print("\nmeasured latency")
-    dry = wide_stereo(n=SR)
+    dry = wide_stereo(n=int(SR * PUMP_S))
 
     eng = AudioEngine(_Gate())
     eng.set_intensity(1.0)
@@ -319,6 +369,30 @@ def test_measured_latency_tracks_the_extra_framing():
           f"{on_ms:.1f} - {off_ms:.1f} = {on_ms - off_ms:.1f} ms, expected ~{expect:.1f}")
 
 
+def test_rebuild_aligns_to_a_processor_that_lags():
+    """The regression test for the doubling bug. A model whose output trails
+    its input by 50 ms must still get an image rebuilt from the RIGHT audio;
+    if the mask is applied 50 ms away from the samples it describes, the
+    reconstruction is smeared and the width it restores is wrong."""
+    print("\nprocessor with real lag (the shipped bug)")
+    dry = wide_stereo(n=int(SR * PUMP_S))
+
+    eng = AudioEngine(_LaggedGate())
+    eng.set_intensity(1.0)
+    eng._wet_gain = 1.0
+    eng.set_stereo(True)
+    on, ref = _pump(eng, dry)
+
+    check("the lag was measured, not assumed", eng._mask_lag is not None,
+          f"measured {eng._mask_lag} samples "
+          f"({(eng._mask_lag or 0) / SR * 1000:.1f} ms), true {_LaggedGate.LAG}")
+    if eng._mask_lag is not None:
+        err = abs(eng._mask_lag - _LaggedGate.LAG) / SR * 1000
+        check("and measured close to the truth", err < 3.0, f"{err:.1f} ms off")
+    w = _db(_side(on[2*len(on)//3:]), _side(ref[2*len(ref)//3:]))
+    check("image restored despite the lag", w > -8.0, f"{w:.1f} dB side retained")
+
+
 def main() -> int:
     print("stereo rebuild tests (no models, no audio hardware required)")
     test_todays_mono_path_collapses_the_image()
@@ -329,6 +403,7 @@ def main() -> int:
     test_engine_emits_a_stereo_wet_signal()
     test_wants_stereo_processor_bypasses_the_rebuild()
     test_measured_latency_tracks_the_extra_framing()
+    test_rebuild_aligns_to_a_processor_that_lags()
     print(f"\n{'FAIL' if FAILURES else 'PASS'}"
           + (f" — {len(FAILURES)}: {', '.join(FAILURES)}" if FAILURES else ""))
     return 1 if FAILURES else 0
