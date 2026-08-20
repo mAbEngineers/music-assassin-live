@@ -82,9 +82,33 @@ jobs:
       # ships a newer Inno Setup preinstalled (6.7.1 as of 2026-08-20), which
       # is on the wrong side of that licensing line, and choco refuses to
       # replace a newer package without being told to.
-      - name: Install Inno Setup 6.4.3 (downgrading the runner's newer one)
-        shell: cmd
-        run: choco install innosetup --version=6.4.3 -y --no-progress --allow-downgrade --force
+      # Not chocolatey: it carries only recent versions and 6.4.3 is long
+      # gone from it. Not files.jrsoftware.org either -- as of March 2026 that
+      # host keeps only .issig signatures and points at GitHub for the
+      # binaries. The GitHub release asset is immutable, which is what makes
+      # the hash below worth pinning.
+      #
+      # The hash is not ceremony. This step downloads an executable and runs
+      # it as administrator on a machine that then builds our installer; an
+      # unverified binary in that position would be the single most valuable
+      # thing in this pipeline to tamper with.
+      - name: Install Inno Setup 6.4.3
+        shell: pwsh
+        run: |
+          $url  = 'https://github.com/jrsoftware/issrc/releases/download/is-6_4_3/innosetup-6.4.3.exe'
+          $want = 'f3c42116542c4cc57263c5ba6c4feabfc49fe771f2f98a79d2f7628b8762723b'
+          Invoke-WebRequest -Uri $url -OutFile is.exe
+          $got = (Get-FileHash is.exe -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) {
+            Write-Error "Inno Setup hash mismatch`n  expected $want`n  got      $got"
+            exit 1
+          }
+          Write-Host "SHA-256 verified: $got"
+          # /VERYSILENT so it cannot block, and it installs over the runner's
+          # preinstalled newer copy rather than beside it.
+          Start-Process -FilePath .\is.exe -Wait -ArgumentList `
+            '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-'
+          exit 0
 
       # Proves the pin actually took. Without this, a silently-newer ISCC
       # would compile the installer fine and nobody would notice the licence
