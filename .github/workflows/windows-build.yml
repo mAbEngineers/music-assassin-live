@@ -77,9 +77,23 @@ jobs:
 
       # 6.4.3 specifically: 6.5.0+ added a paid commercial-license tier, so
       # this is the last version unambiguously free for this project.
-      - name: Install Inno Setup 6.4.3
+      #
+      # The downgrade flags are load-bearing, not defensive. windows-latest
+      # ships a newer Inno Setup preinstalled (6.7.1 as of 2026-08-20), which
+      # is on the wrong side of that licensing line, and choco refuses to
+      # replace a newer package without being told to.
+      - name: Install Inno Setup 6.4.3 (downgrading the runner's newer one)
         shell: cmd
-        run: choco install innosetup --version=6.4.3 -y --no-progress
+        run: choco install innosetup --version=6.4.3 -y --no-progress --allow-downgrade --force
+
+      # Proves the pin actually took. Without this, a silently-newer ISCC
+      # would compile the installer fine and nobody would notice the licence
+      # question had been reopened.
+      - name: Show which Inno Setup compiled this
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" /? 2>&1 | findstr /i "Inno Setup"
+          exit /b 0
 
       # No .onnx weights in the repo (release assets), hence ALLOW_NO_MODELS.
       # Enough to compile; deliberately not enough to ship.
