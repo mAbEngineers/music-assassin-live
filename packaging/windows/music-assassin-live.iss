@@ -108,9 +108,14 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch Music Assassin Live"; Fl
 
 [Code]
 const
-  WM_SETTINGCHANGE = $001A;
-  HWND_BROADCAST = $FFFF;
-  SMTO_ABORTIFHUNG = $0002;
+  { Prefixed because Inno Setup predefines some of these itself -- an
+    unprefixed HWND_BROADCAST aborted the very first compile this script was
+    ever put through ("Duplicate identifier"). Which names are built in
+    varies by version, so rather than track that, none of ours share a
+    namespace with it. }
+  MA_WM_SETTINGCHANGE = $001A;
+  MA_HWND_BROADCAST = $FFFF;
+  MA_SMTO_ABORTIFHUNG = $0002;
 
 function SendMessageTimeoutA(hWnd: Integer; Msg: Integer; wParam: Integer;
   lParam: String; fuFlags: Integer; uTimeout: Integer;
@@ -124,8 +129,8 @@ begin
   { Broadcast WM_SETTINGCHANGE so a freshly-launched app (e.g. the one this
     installer just offered to run) sees MUSIC_ASSASSIN_MODELS without the
     user needing to log off/on. }
-  SendMessageTimeoutA(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 'Environment',
-    SMTO_ABORTIFHUNG, 5000, ResultCode);
+  SendMessageTimeoutA(MA_HWND_BROADCAST, MA_WM_SETTINGCHANGE, 0, 'Environment',
+    MA_SMTO_ABORTIFHUNG, 5000, ResultCode);
 end;
 
 function VBCableAppearsInstalled: Boolean;
