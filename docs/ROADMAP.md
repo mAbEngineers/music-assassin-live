@@ -1339,6 +1339,20 @@ by the Tcl interpreter as well — a PhotoImage belongs to the interpreter
 that made it, and the cache is also what keeps them alive, since Tk collects
 an unreferenced image and then draws nothing with no error.
 
+**The list a dropdown opens is drawn now too.** `tk.Menu` was the second
+thing to be themed out from under us: it took our colours on the development
+machine and the *system menu palette* on the user's, and since it sizes and
+places itself, it came up narrower than the field it belongs to and offset
+from it, with no indication of which item was current. `widgets._Popup` is a
+borderless `Toplevel` holding a canvas: the field's exact width, aligned
+under it, hairline border, hover highlight, and the current item marked with
+an accent bar. Keyboard (up/down/return/escape), wheel scrolling past nine
+rows, a global grab so a click anywhere outside dismisses it, and it flips
+above the field when there is no room below. An empty picker opens and says
+"no devices found" rather than doing nothing, which is indistinguishable
+from a broken control. The field brightens its edge while the list is up —
+deliberately not to the accent, which is already marking the current row.
+
 Two things stayed as canvas primitives on purpose: the meter bars, which are
 axis-aligned rectangles with nothing to alias, and the fader's track, which
 is a straight bar. The dropdown's chevron became a `▾` glyph — text is the

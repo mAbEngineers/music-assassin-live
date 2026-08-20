@@ -401,13 +401,147 @@ class HoldButton(tk.Canvas):
             self.command(False)
 
 
+class _Popup(tk.Toplevel):
+    """The list a Dropdown opens, drawn rather than delegated.
+
+    `tk.Menu` was the second attempt and the second thing to be themed out
+    from under us: it took our colours on one machine and the system menu
+    palette on another, and it sizes and places itself, so it came up
+    narrower than the field it belongs to and offset from it. A borderless
+    toplevel with a canvas in it looks the same everywhere, lines up with
+    the field exactly, and can say which item is the current one — which a
+    picker showing five model names rather badly needs.
+    """
+
+    MAX_ROWS = 9        # taller than this and it scrolls instead
+
+    def __init__(self, owner, values, current, *, surface, border, fg, muted,
+                 accent, hover, font, width, row_h, on_pick):
+        super().__init__(owner)
+        self.withdraw()
+        self.overrideredirect(True)
+        self.configure(bg=border)          # the 1 px frame around the canvas
+        self.values, self.current = list(values), current
+        self.fg, self.muted, self.accent = fg, muted, accent
+        self.surface, self.hover = surface, hover
+        self.font, self.row_h, self.on_pick = font, row_h, on_pick
+        self.hover_index = self.values.index(current) if current in self.values else -1
+
+        inner_w = max(1, width - 2)
+        rows = max(1, min(len(self.values), self.MAX_ROWS))
+        self.canvas = tk.Canvas(self, bg=surface, highlightthickness=0, bd=0,
+                                width=inner_w, height=rows * row_h,
+                                scrollregion=(0, 0, inner_w,
+                                              len(self.values) * row_h))
+        self.canvas.pack(padx=1, pady=1)
+        self.canvas.bind("<Motion>", self._on_motion)
+        self.canvas.bind("<Button-1>", self._on_click)
+        for wheel_up, wheel_down in (("<Button-4>", "<Button-5>"),):
+            self.canvas.bind(wheel_up, lambda _e: self._scroll(-1))
+            self.canvas.bind(wheel_down, lambda _e: self._scroll(1))
+        self.bind("<Escape>", lambda _e: self.dismiss())
+        self.bind("<Up>", lambda _e: self._step(-1))
+        self.bind("<Down>", lambda _e: self._step(1))
+        self.bind("<Return>", lambda _e: self._pick(self.hover_index))
+        self._draw()
+
+    # -- placement -----------------------------------------------------------
+    def show(self, x: int, y: int, above_y: int) -> None:
+        """Below the field, or above it when there is no room below."""
+        self.update_idletasks()
+        h = self.winfo_reqheight()
+        if y + h > self.winfo_screenheight() and above_y - h > 0:
+            y = above_y - h
+        self.geometry(f"+{x}+{y}")
+        self.deiconify()
+        self.lift()
+        self.focus_set()
+        # A global grab, so a click anywhere outside dismisses instead of
+        # leaving a list floating over an app that has moved on.
+        try:
+            self.grab_set_global()
+        except tk.TclError:
+            self.grab_set()
+        self.bind("<Button-1>", self._maybe_outside, add="+")
+
+    def _maybe_outside(self, event) -> None:
+        if event.widget is not self.canvas:
+            self.dismiss()
+
+    def dismiss(self) -> None:
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+    # -- drawing -------------------------------------------------------------
+    def _draw(self) -> None:
+        self.canvas.delete("all")
+        w = int(self.canvas.cget("width"))
+        pad = max(8, int(round(self.row_h * 0.34)))
+        for i, value in enumerate(self.values):
+            top = i * self.row_h
+            chosen = value == self.current
+            if i == self.hover_index:
+                self.canvas.create_rectangle(0, top, w, top + self.row_h,
+                                             fill=self.hover, outline="")
+            if chosen:
+                # A bar rather than a tick: it survives every font, and it
+                # marks the row without competing with the label.
+                self.canvas.create_rectangle(0, top + 3, 3, top + self.row_h - 3,
+                                             fill=self.accent, outline="")
+            self.canvas.create_text(pad, top + self.row_h / 2, text=value,
+                                    anchor="w", font=self.font,
+                                    fill=self.accent if chosen else self.fg)
+
+    def _index_at(self, event) -> int:
+        y = self.canvas.canvasy(event.y)
+        i = int(y // self.row_h)
+        return i if 0 <= i < len(self.values) else -1
+
+    def _on_motion(self, event) -> None:
+        i = self._index_at(event)
+        if i != self.hover_index:
+            self.hover_index = i
+            self._draw()
+
+    def _on_click(self, event) -> None:
+        self._pick(self._index_at(event))
+
+    def _pick(self, index: int) -> None:
+        if 0 <= index < len(self.values):
+            value = self.values[index]
+            self.dismiss()
+            self.on_pick(value)
+        else:
+            self.dismiss()
+
+    def _step(self, delta: int) -> None:
+        if not self.values:
+            return
+        self.hover_index = max(0, min(len(self.values) - 1,
+                                      self.hover_index + delta))
+        self._scroll_to(self.hover_index)
+        self._draw()
+
+    def _scroll(self, units: int) -> None:
+        self.canvas.yview_scroll(units, "units")
+
+    def _scroll_to(self, index: int) -> None:
+        total = len(self.values) * self.row_h
+        if total <= int(self.canvas.cget("height")):
+            return
+        self.canvas.yview_moveto(max(0.0, (index * self.row_h - self.row_h) / total))
+
+
 class Dropdown(tk.Canvas):
-    """A filled pill with a chevron, backed by a `tk.Menu`.
+    """A filled pill with a chevron, opening a drawn list (_Popup).
 
     `ttk.Combobox` was styled through `option_add("*TCombobox*Listbox...")`
     incantations that reach into a widget's internals by name and silently
-    do nothing when they miss. A `tk.Menu` takes its colours directly, pops
-    up where it is told, and cannot be themed out from under us.
+    do nothing when they miss; `tk.Menu` replaced it and took the system
+    palette on some machines. This owns its pixels.
 
     Reads and writes a `StringVar`, so callers that already hold one keep it.
     """
@@ -424,9 +558,7 @@ class Dropdown(tk.Canvas):
         self.var = variable
         self.values = list(values)
         self.command = command
-        self._menu = tk.Menu(self, tearoff=0, bg=field, fg=fg,
-                             activebackground=accent, activeforeground=fg,
-                             bd=0, relief=tk.FLAT, font=font)
+        self._open = None
         self.bind("<Button-1>", self._popup)
         self.var.trace_add("write", lambda *_: self._draw())
         self._draw()
@@ -436,9 +568,14 @@ class Dropdown(tk.Canvas):
 
     def _draw(self):
         self.delete("all")
+        # The field brightens while its list is up, so the two read as one
+        # control. Deliberately not the accent: the accent is already doing
+        # a job inside the list, marking the current item, and spending it
+        # twice in one glance makes neither use mean anything.
+        edge = _lighten(self.border, 0.45) if self._open else self.border
         self.create_image(0, 0, anchor="nw", image=aa_shape(
             self, self.w, self.h, bg=self.bg_colour, fill=self.field,
-            radius=max(4.0, self.h * 0.22), outline=self.border,
+            radius=max(4.0, self.h * 0.22), outline=edge,
             outline_px=max(1.0, self.h / 28.0)))
         pad = max(8, int(round(self.h * 0.34)))
         text = self._fit(self.var.get() or "—", self.w - pad - self.h)
@@ -462,14 +599,28 @@ class Dropdown(tk.Canvas):
             self.delete(probe)
 
     def _popup(self, _evt=None):
-        self._menu.delete(0, tk.END)
-        for value in self.values:
-            self._menu.add_command(
-                label=value, command=lambda v=value: self._choose(v))
-        if not self.values:
-            self._menu.add_command(label="(none available)", state=tk.DISABLED)
-        self._menu.tk_popup(self.winfo_rootx(),
-                            self.winfo_rooty() + self.h + 2)
+        if self._open is not None:
+            return
+        # An empty picker still opens, and says why. Doing nothing on click
+        # is indistinguishable from a broken control.
+        values, pick = ((self.values, self._choose) if self.values
+                        else (["no devices found"], lambda _v: None))
+        self._open = _Popup(
+            self, values, self.var.get(), surface=self.field,
+            border=self.border, fg=self.fg, muted=self.muted,
+            accent=self.accent, hover=_lighten(self.field, 0.10),
+            font=self.font, width=self.w, row_h=max(24, int(self.h * 0.95)),
+            on_pick=pick)
+        self._open.bind("<Destroy>", self._closed, add="+")
+        self._draw()
+        self._open.show(self.winfo_rootx(),
+                        self.winfo_rooty() + self.h + max(2, self.h // 8),
+                        self.winfo_rooty() - max(2, self.h // 8))
+
+    def _closed(self, event=None):
+        if event is None or event.widget is self._open:
+            self._open = None
+            self._draw()
 
     def _choose(self, value: str):
         if value == self.var.get():
