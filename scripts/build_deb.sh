@@ -23,7 +23,12 @@ cd "$ROOT"
 
 PKG=music-assassin-live
 VENV="$ROOT/.venv"
-BUILD_DIR="$ROOT/build"
+# Overridable so the scratch tree can live on local disk. Building on a
+# network mount fails in ways that look nothing like a packaging bug: objcopy
+# cannot rewrite ELF sections in place there ("Operation not supported"), and
+# PyInstaller's --add-data refuses any source path containing a colon, which
+# a gvfs/sftp mount point has. The finished .deb still lands in dist/.
+BUILD_DIR="${BUILD_DIR:-$ROOT/build}"
 DIST_DIR="$ROOT/dist"
 STAGE="$BUILD_DIR/deb-root"
 MAINTAINER="${DEB_MAINTAINER:-A-Ahmad-02 <a.ahmad.mab@gmail.com>}"
@@ -58,9 +63,26 @@ fi
     "$VENV/bin/pip" install pyinstaller
 }
 
-command -v convert >/dev/null 2>&1 || {
-    echo "error: ImageMagick 'convert' not found (needed to render icon sizes). Install imagemagick." >&2
+# Icon downscaler. ImageMagick is the intended one; ffmpeg is accepted as a
+# fallback because it is already present on machines that touch audio and
+# does the same Lanczos resize, which spares a sudo apt-get on a build box
+# that has everything else it needs.
+if command -v convert >/dev/null 2>&1; then
+    ICON_TOOL=convert
+elif command -v ffmpeg >/dev/null 2>&1; then
+    ICON_TOOL=ffmpeg
+else
+    echo "error: need ImageMagick 'convert' or 'ffmpeg' to render icon sizes." >&2
     exit 1
+fi
+
+render_icon() {  # src size dest
+    if [ "$ICON_TOOL" = convert ]; then
+        convert "$1" -filter Lanczos -resize "${2}x${2}" "$3"
+    else
+        ffmpeg -v error -y -i "$1" -vf "scale=${2}:${2}:flags=lanczos" \
+            -pix_fmt rgba "$3"
+    fi
 }
 
 rm -rf "$STAGE" "$BUILD_DIR/pyinstaller"
@@ -75,7 +97,11 @@ for sz in "${ICON_SIZES[@]}"; do
 done
 
 echo "==> running PyInstaller"
-"$VENV/bin/pyinstaller" --name "$PKG" \
+# Module form, not $VENV/bin/pyinstaller: console-script shebangs hold the
+# absolute path the venv was created at, so they stop working the moment the
+# checkout is reached by another path (a network mount, a moved directory).
+# python -m has no shebang to go stale.
+"$VENV/bin/python" -m PyInstaller --name "$PKG" \
     --onefile \
     --collect-all onnxruntime \
     --hidden-import tkinter \
@@ -100,7 +126,7 @@ install -m 755 "$ROOT/packaging/postrm" "$STAGE/DEBIAN/postrm"
 echo "==> rendering icon sizes"
 ICON_SRC="$ROOT/packaging/icons/${PKG}-1024.png"
 for sz in "${ICON_SIZES[@]}"; do
-    convert "$ICON_SRC" -filter Lanczos -resize "${sz}x${sz}" \
+    render_icon "$ICON_SRC" "$sz" \
         "$STAGE/usr/share/icons/hicolor/${sz}x${sz}/apps/$PKG.png"
 done
 install -m 644 "$STAGE/usr/share/icons/hicolor/64x64/apps/$PKG.png" \
