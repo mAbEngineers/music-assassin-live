@@ -747,18 +747,129 @@ band). A synthetic-corpus run of `evaluate()` moves `stereo_width_db` from
 every separation metric bit-identical — the rebuild does not perturb the mono
 numbers, by design.
 
-### B4. Lookahead + crossfade smoothing — gated on a question
+### B4. Constrain the mask in time — the next quality lever ⭐
 
-The interrupted "sliding window continuous filtering" thread. The models
-already do overlapping WOLA framing with recurrent state, so processing is not
-literally per-block-independent today; the analysis window is just tiny (20 ms)
-and baked into the checkpoint. The only lever on the app side is a
-lookahead + crossfade stage after the model (~50–150 ms buffer, trades latency
-for smoothness).
+The interrupted "sliding window continuous filtering" thread, now with a
+design and a reason that does not depend on Q1 being answered.
 
-**Do not build this yet.** First confirm the symptom still reproduces — the
-dry/wet echo bug fixed in `a33f1e4` may have been the actual cause of the
-"choppy/watery" complaint that prompted the question. See §10, Q1.
+**What the corpus says.** `dpdfnet_hr` fires `vocal-loss` on 36/104 pairs and
+`pumping` on 38/104. Those are the same defect seen from two sides: a gain
+that collapses faster than a syllable. It is not a suppression failure —
+`music_supp` is −46.1 dB and `musical_noise` is 1.02, the best of anything
+measured — it is a *speed* failure. Nothing in the app currently constrains
+how fast the chain's gain may move.
+
+**Where the lever is, and it already exists.** `audio/stereo.py` derives the
+chain's implied spectral mask from the audio itself — `|Wet| / |Dry_mono|`
+per bin — because that is what the stereo rebuild applies to both channels.
+That mask is exactly the quantity B4 wants to constrain, and it is derived
+without asking any processor to change, so it works on all four models at
+once, the same property that made B3 cheap.
+
+Three parameters, all per-bin, all in that mask domain:
+
+| parameter | what it does | plausible range |
+|---|---|---|
+| `release_ms` | how fast a bin's gain may **fall** | 0 (off) – 120 ms |
+| `attack_ms` | how fast it may **rise** | 0 – 30 ms |
+| `floor_db` | how far down it may go at all | −60 (off) – −12 dB |
+
+`floor_db` generalises `speechdenoiser`'s `atten_lim_db` — the one model with
+a suppression limit — to every model, which is also the control the UI has
+wanted (see C12).
+
+**What it costs.** The mono path does not currently build a mask; it hands
+the model's mono output straight through. Smoothing it means one STFT of dry
+and one of wet per block on the worker thread, which is where the budget is:
+1.9 ms used of 20 ms today. **Measure it before believing it** — that budget
+is also A1's, and B3's own framing already costs 5.3 ms of latency.
+
+**How it gets judged.** `--sweep smooth_ms=0,20,40,80` and
+`floor_db=-60,-24,-18,-12` over the whole corpus, then the tags rather than
+the summary numbers: `vocal-loss` and `pumping` counts must fall, while
+`music_supp` in music-only passages must hold at −40 dB or better and
+`musical_noise` must not rise — smoothing a mask is exactly the operation
+that can smear a residual into a warble. dSI-SDR is the wrong scoring here,
+for the reason B1 recorded: it weights music removal over voice, which is
+the opposite of the standing product judgement.
+
+**Then by ear**, which is what Q1 was really asking. Not blocking any more:
+the tag counts justify building it, and the sweep decides whether it ships.
+
+### B9. Give the top octave back — the damage is concentrated there
+
+Whole-corpus per-band vocal damage for `dpdfnet_hr`, sub/low/mid/high/air:
+**−4.8 / −4.3 / −7.0 / −8.6 / −9.1 dB**. On `male_lead`, where it is worst:
+−8.1 / −7.3 / −11.3 / −11.7 / **−13.0**. The damage is not spread evenly —
+it more than doubles from the bottom band to the top, and `hf-loss` fires
+28/104 with `hf-loss-4k` 30/104.
+
+So: blend dry back above a crossover, at a chosen amount. Above ~6–8 kHz
+music is mostly cymbals and air rather than the pitched content that makes a
+backing track recognisable, while voice up there is most of what makes it
+sound like a person in the room rather than through a wall.
+
+Cheap to build (one crossover, one gain, in the same mask domain as B4 or as
+a plain post-filter) and directly measurable: `band_damage`'s `high` and
+`air` columns should move while `music_supp` holds. Sweep
+`hf_dry=0,25,50,100 %` × `hf_hz=4000,6000,8000`.
+
+**Watch for the trap:** the two 16 kHz-native models delete everything above
+8 kHz *by construction*, so on `dtln`/`gtcrn` this control would be
+resynthesising nothing from nothing. It belongs to the 48 kHz models.
+
+### B10. Normalise what the model is fed
+
+§2.1 recorded that `dpdfnet_hr` is **level-dependent** — its behaviour
+changes with input level, which makes every measurement conditional on how
+loud the source happened to be, and makes the app's quality depend on
+whether the user's music is mastered hot. There is no input trim anywhere in
+the chain: whatever the monitor delivers goes to the model.
+
+A slow AGC ahead of the model, with the inverse gain applied after it (so
+the output level is unchanged and only the model's *operating point* moves)
+is a small, testable change. The harness already reports input RMS per phase
+(A6), so the sweep is: the whole corpus at −6, −12 and −18 dBFS input, with
+and without the normaliser, watching whether the spread in `music_supp` and
+`vocal_ret` collapses.
+
+If it does, it is also the explanation owed for **E2's unaccounted 34 dB
+swing** (§ "Two retractions and one hole"), which lost its only candidate
+when C2's confound was measured away.
+
+### C12. Controls the engine has and the panel does not (after B4)
+
+The panel exposes three switches, a pipeline picker and one mix fader. Every
+other decision in the chain is a constant in the source. B4 and B9 add three
+real parameters each of which a listener can have an opinion about, and the
+panel is now a shape that has room for them (C11).
+
+**What to add, in the order the engine grows it:**
+
+1. **Suppression floor** (`floor_db`, from B4) — one slider, all models. The
+   existing "Suppression Limit" row already has this shape, and would stop
+   being a `speechdenoiser`-only oddity.
+2. **Smoothing** (`release_ms`, from B4) — one slider. The control that
+   trades "a syllable survives" against "a residual warbles".
+3. **Keep air above N kHz** (from B9) — a crossover and an amount, and the
+   only control that addresses the complaint the by-ear pass keeps
+   returning: it still misses some audio.
+4. **Centre focus** — `MidSideFilter(exponent=4.0)` is hardcoded and B2 says
+   4 measures *worse* than off on real content. Once B2 has swept it, the
+   switch becomes a slider with a defensible default rather than a boolean
+   whose true value is somebody's guess.
+5. **Presets**, once 1–4 exist: `voice first` / `balanced` / `music first`
+   as a segmented control, setting model, floor, smoothing and mix together.
+   This is where the standing product judgement — vocal preservation matters
+   more than music removal — becomes something a user can actually express.
+   Today the only way to say it is to pull a mix fader that also changes the
+   output level.
+6. **Reduction readout** — the panel already meters input and output
+   (C10); the difference in dB is what "how much is it actually removing"
+   looks like, live, and it costs one subtraction.
+
+**Not yet:** a latency-mode selector belongs with A1, when there is a
+high-latency mode to select.
 
 ### B5. Post-separator cleanup chain (only relevant after A1)
 
@@ -1720,10 +1831,20 @@ entry ticket to a Windows APO later. Not near-term.
 
 ### Phase 3 — Make it actually remove music (weeks)
 
-17. **A1 — separator spike** on `feat/separator-spike`: stereo processor
-    contract, chunked Spleeter wrapper, latency-vs-quality curve.
-18. **A3 — data-driven model registry** (also unblocks C6, E5).
-19. **A2 — HS-TasNet training** running in the research repo in parallel
+17. ~~**A1 — separator spike**~~ done: processor, sweep, and the finding
+    that latency is the binding constraint (≥1.1 s), which answers Q3 by
+    force. What remains of A1 is a product decision, not code.
+18. **B4 — constrain the mask in time.** The next quality lever, and the
+    first one aimed at the complaint every by-ear pass has returned: it
+    still misses some audio. Sweep-gated, not opinion-gated.
+19. **B9 — give the top octave back.** Where the measured damage actually
+    is, and cheap once B4's mask machinery exists.
+20. **C12 — expose what B4 and B9 add**, plus the presets that let someone
+    say "voice first" without moving a fader that also changes the volume.
+21. **B10 — normalise the model's input level**, which may also be the
+    missing explanation for E2's 34 dB swing.
+22. **A3 — data-driven model registry** (also unblocks C6, E5).
+23. **A2 — HS-TasNet training** running in the research repo in parallel
     throughout.
 
 ### Phase 4 — Second platform (parallel, own branch)
@@ -1741,10 +1862,13 @@ C5 (tray/autostart), C6 (first-run download), D5 (AppImage, LADSPA), A4
 
 ## 10. Open decisions — need an answer before the dependent work starts
 
-**Q1 (blocks B4).** What symptom prompted the "sliding window / continuous
-filtering" question — choppy/warbling artifacts, "not aggressive enough," or
-general exploration? These need different, non-overlapping fixes. And: does
-the original symptom still reproduce after the echo fix in `a33f1e4`?
+**Q1 (no longer blocks B4).** What symptom prompted the "sliding window /
+continuous filtering" question — choppy/warbling artifacts, "not aggressive
+enough," or general exploration? These need different, non-overlapping fixes.
+**B4 is no longer waiting on the answer:** `vocal-loss` 36/104 and `pumping`
+38/104 are a measured reason to build it, and its sweep decides whether it
+ships. The question is still worth answering, because it decides what a
+listener should be checking for when the sweep produces candidates.
 
 **Q2 (blocks C5).** Should the app remember that filtering was ON and resume
 on launch? Current behavior (never resume) is the safe default for something

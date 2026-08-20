@@ -1,6 +1,6 @@
 # Handover — current state
 
-Updated 2026-08-19. **This file is deliberately short.** It covers only where
+Updated 2026-08-20. **This file is deliberately short.** It covers only where
 things stand *right now* and what to do next. The plan, the reasoning, the
 measured findings and the list of dead ends all live in
 [`docs/ROADMAP.md`](docs/ROADMAP.md) — read that before re-deriving anything.
@@ -13,16 +13,27 @@ measured findings and the list of dead ends all live in
 |---|---|---|
 | `main` | 0.1.4, green on the offline suite | at `8df4f83` |
 | `feature/stereo-output` | B3 stereo rebuild, `wants_stereo`, C1, C2, C3, C4, C7, C8, E1 | **13 commits, unpushed** |
-| `feat/separator-spike` | A1 spike + the SpleeterProcessor and its sweep, then B6/B7/C9 | 5 commits, off the above |
+| `feat/separator-spike` | A1 spike + the SpleeterProcessor and its sweep, then B6/B7/C9, then B8/B6b/C10 and the C11 panel rebuild | **17 commits, off the above** |
 | `feature/windows-packaging` | installer scaffolding | not merged — app can't run on Windows (D3) |
 
-Pushing needs to happen from a machine with credentials — this session had
-none (`gh` installed but not logged in, no credential helper):
+**55 commits ahead of `origin/main`**, which is still at `06f0ac8`
+(verified live — nothing has moved on the remote). Pushing needs a machine
+with credentials; the sessions so far had none (`gh` installed but not
+logged in, no credential helper). Push the parent branch first, or its
+commits arrive with no branch name on them:
 
 ```
+gh auth login
 git push -u origin feature/stereo-output
 git push -u origin feat/separator-spike
 ```
+
+**`git commit -m` and `-F` fail in this checkout** — `fatal: could not read
+commit message: No such file or directory`. It is not the message: git
+writes `.git/COMMIT_EDITMSG` and cannot read it back over the gvfs/sftp
+mount. It worked earlier the same day and then stopped, so it is the mount,
+not the repo. The workaround that does work is `git commit-tree` +
+`git update-ref`; committing from the machine that owns the repo avoids it.
 
 That first push is also the **first exercise of the new CI workflow**
 (`.github/workflows/tests.yml`). Expect a possible iteration on the apt/pip
@@ -30,10 +41,13 @@ step; it has never run.
 
 ## What gates the 0.1.4 tag
 
-**The app has now been run** (2026-08-19, from the repo:
-`.venv/bin/python -m assassin_live` — not the `.deb`, which is still `main`).
-That session produced four defect reports, three fixed and one open. What
-remains before tagging:
+**Everything left needs ears, not code.** Four defects were reported from the
+first real run (2026-08-19, from the repo: `.venv/bin/python -m
+assassin_live` — not the `.deb`, which is still `main`); three were fixed
+that day and the fourth, the dry/wet skew, was fixed the next. The panel was
+then rebuilt (C11) and has been seen running, so the layout is not
+speculative — but **none of the three audio fixes has been confirmed by
+ear**, and that is what the tag is waiting on:
 
 **1. Doubling still reported with the stereo rebuild on `dpdfnet_hr`.**
 B6's fix is confirmed working on `dtln` (8 ms lag) and in the offline
@@ -102,6 +116,54 @@ padded now: measured 0.0 ms skew with the fix against 49.9 ms without it. The
 mix slider should now work as the tool it was meant to be — trading vocal
 damage against music removal — which is worth confirming before B4 starts
 producing candidates to compare with it.
+
+## What to do next
+
+In order. The first two are yours; the rest is work waiting on them.
+
+**1. Listen to what landed.** Three fixes are green in tests and unheard:
+the mix alignment (B8), the estimator hardening (B6b), and whether the
+stereo rebuild still doubles on `dpdfnet_hr`. Fifteen minutes with the app
+answers all three, and the readouts to quote are on the status bar.
+
+**2. Re-rank the models blind** through `scripts/ab_listen.sh`, not through
+the app. The current ranking is confounded: the same listener rated `dtln`
+worse before B6 and better after, which is what a 50 ms-misaligned mask
+would do to every model at once.
+
+**3. B4 — constrain the mask in time.** The next quality lever, and the
+first one aimed squarely at the standing complaint ("it still misses some
+audio"). `vocal-loss` fires 36/104 and `pumping` 38/104 and they are the same
+defect from two sides: a gain that collapses faster than a syllable. The
+machinery already exists — `audio/stereo.py` derives the chain's implied
+spectral mask, which is exactly the quantity to constrain, and doing it
+there works on all four models without touching a processor. Three
+parameters (`release_ms`, `attack_ms`, `floor_db`), swept over the corpus and
+judged on the *tags* rather than dSI-SDR, which scores this backwards. Full
+design in ROADMAP B4. No longer blocked on Q1.
+
+**4. B9 — give the top octave back.** The measured damage is concentrated
+there: whole-corpus per-band vocal loss runs −4.8 / −4.3 / −7.0 / −8.6 /
+**−9.1** dB from sub to air, and −13.0 in the air band on `male_lead`.
+Blending dry back above a 6–8 kHz crossover is one crossover and one gain,
+and `band_damage` measures it directly. 48 kHz models only — `dtln` and
+`gtcrn` have nothing up there to restore.
+
+**5. C12 — expose what 3 and 4 add.** Suppression floor and smoothing as
+sliders that work on every model (today only `speechdenoiser` has a limit),
+"keep air above N kHz", and then presets — `voice first` / `balanced` /
+`music first` — which is how the standing product judgement becomes
+something a user can state. Right now the only way to say "protect the
+voice" is to pull a mix fader that also changes the output level. The panel
+has room for all of it since C11.
+
+**6. B10 — normalise the model's input level.** `dpdfnet_hr` is
+level-dependent (§2.1) and nothing in the chain trims the input, so quality
+depends on how hot the source is mastered. It may also be the missing
+explanation for E2's unaccounted 34 dB swing.
+
+Everything above is measurable offline before anyone listens, which is the
+order that has worked so far: sweep, then ears, then ship.
 
 ## The by-ear results so far (2026-08-19)
 
@@ -324,6 +386,30 @@ come from `Music-Assassin/models/sherpa_onnx/sherpa-onnx-spleeter-2stems-int8/`
 (2 × 26 MB — note the `sherpa_onnx/` path component); `scripts/import_models.py`
 now copies them in under the names the registry looks up.
 
+## What landed 2026-08-19/20 (UI)
+
+- **C11** — the control panel is a 680 × 430 two-column window: capsule
+  switches instead of three full-width buttons, a pill power control, meters
+  on a dB scale, hold-to-compare, and a status bar welded to the bottom
+  edge. Colour means one thing at a time now — red is the brand and the
+  quantity being changed, green is *running*, red text is a fault and only
+  ever text. Researched against SoundSource 6, Easy Effects, NVIDIA
+  Broadcast and Krisp first; the five things the drawing got wrong and a
+  render corrected are in ROADMAP C11.
+- **Antialiasing.** The Tk canvas has none, so every circle in the panel had
+  a stepped edge that read as a smudge. Shapes are rendered from a signed
+  distance field with numpy and blitted as PNGs (`widgets.aa_shape`). The
+  icon badge loads a pre-rendered size instead of `subsample()`, which is
+  point sampling.
+- **The dropdown list is drawn**, not delegated. `tk.Menu` came up narrower
+  than its field, offset from it, and took the *system* palette on the
+  user's machine — the same failure `ttk.Combobox` had. `widgets._Popup` is
+  a borderless toplevel that owns its pixels: field width, aligned, current
+  item marked, keyboard and wheel, global grab, flips above when there is no
+  room below.
+- **Status messages hold** (4 s, 20 s for faults), because the tick used to
+  erase them within a second.
+
 ## What landed 2026-08-19 (second session)
 
 - **B8** — the dry/wet mix carried B6's skew. The lag pad reached
@@ -410,7 +496,14 @@ Full list in ROADMAP §10. Live ones:
   clips. The corpus proves the rebuild works but cannot show it failing
   gracefully (median S/M −8.2 dB, nothing hard-panned).
   `bench_quality.py` already reserves the category name `stereo_torture`.
-- **Q1** (blocks B4) and **Q2** (blocks C5) unchanged.
+- **Q1** no longer blocks B4 — the tag counts are reason enough to build it
+  and the sweep decides whether it ships. The answer still shapes what a
+  listener should be checking for when candidates exist.
+- **Q2** (blocks C5, resume-on-launch) unchanged.
+- **New, and B4 will ask it:** how much *musical noise* is an acceptable
+  price for keeping a syllable? `dpdfnet_hr` scores 1.02 there, the best of
+  anything measured, and smoothing a mask is exactly the operation that
+  trades that away. The sweep can price it; only a listener can accept it.
 
 ## Environment notes
 
