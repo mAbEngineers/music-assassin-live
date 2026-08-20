@@ -14,7 +14,7 @@ measured findings and the list of dead ends all live in
 | `main` | 0.1.4, green on the offline suite | at `8df4f83` |
 | `feature/stereo-output` | B3 stereo rebuild, `wants_stereo`, C1, C2, C3, C4, C7, C8, E1 | **13 commits, unpushed** |
 | `feat/separator-spike` | A1 spike + the SpleeterProcessor and its sweep, then B6/B7/C9, then B8/B6b/C10 and the C11 panel rebuild | **17 commits, off the above** |
-| `feature/windows-packaging` | installer scaffolding | not merged — app can't run on Windows (D3) |
+| `feature/windows-packaging` | installer scaffolding | ~25 commits stale; cherry-pick forward, never merge (D3.1) |
 
 **55 commits ahead of `origin/main`**, which is still at `06f0ac8`
 (verified live — nothing has moved on the remote). Pushing needs a machine
@@ -164,6 +164,36 @@ explanation for E2's unaccounted 34 dB swing.
 
 Everything above is measurable offline before anyone listens, which is the
 order that has worked so far: sweep, then ears, then ship.
+
+## Windows — planned 2026-08-20, not started
+
+Written out in ROADMAP D3 (phased) and D4 (licensing, now settled). Three
+things worth carrying without opening it:
+
+- **The installer was never the blocker.** `packaging/windows/` has existed
+  since 2026-08-13 and has still never been compiled or run; what is missing
+  sits underneath it. D2 landing means the routing backend is now one new file
+  written against `backends/base.py`, not a fork of three.
+- **Two claims in the old plan were wrong**, both corrected in D3. sounddevice
+  0.5.5 has no WASAPI loopback flag — `WasapiSettings` takes
+  `exclusive, auto_convert, explicit_sample_format` and nothing else — and
+  loopback would be the wrong tool regardless: it *taps* the signal where this
+  app has to *insert* into it, so the original audio would keep playing
+  underneath the processed one. A virtual output device is therefore required
+  for v1; the only alternative is an APO, which is the C++ port.
+- **VB-CABLE is settled.** The public build downloads it from VB-Audio with a
+  pinned SHA-256, verifies, extracts and runs it elevated — so our artifact
+  ships none of their bytes, nothing is redistributed, and five of the seven
+  manual steps disappear along with both of the silent-failure traps. A
+  separately-named bundled build stays for internal use only; the name does
+  not change what publishing it would mean.
+
+Two decisions still open, both cheap: whether `paths.py` should use
+`%LOCALAPPDATA%` on Windows instead of XDG (D3.2), and whether
+`vb-audio-permission-email.md` is worth sending at all now that the download
+path makes bundling unnecessary.
+
+Start at D3.1. Nothing here needs a Windows machine until D3.3.
 
 ## The by-ear results so far (2026-08-19)
 

@@ -1619,7 +1619,7 @@ platform split. The tree that had blocked three sessions is now committed and
 | `fix/stream-recovery` | 0.1.4: `stream_ok`, callback try/except, soft limiter, 300% wet boost, `tests/test_engine_recovery.py` | Ready now — tested, suite green |
 | `feature/quality-harness` | `tests/bench_quality.py` + README quickstart | Ready now |
 | `fix/e2e-alignment` | `test_live_e2e.py` cross-correlation alignment + engine counters | With/after the harness |
-| `feature/windows-packaging` | `packaging/windows/`, `.ico`, `build_windows.bat`, `.gitignore` rule | Windows app actually runs (D3) |
+| `feature/windows-packaging` | `packaging/windows/`, `.ico`, `build_windows.bat`, `.gitignore` rule | never — too stale to merge; cherry-pick forward per D3.1 |
 | `docs/roadmap` | this document | Anytime |
 
 **These are not all independent — the first three are a chain**, and it is a
@@ -1641,33 +1641,195 @@ Mobile is already a separate *repo*, which is the right call for a different
 language and build system. Windows shares this repo's Python codebase, so a
 branch is the correct granularity, not a fourth repo.
 
-### D2. Extract a routing backend interface — before writing Windows code
+### D2. Extract a routing backend interface ✅ done
 
-`routing.py` is Linux-only with no abstraction seam, and `engine.py` reaches
-into PipeWire directly (`PULSE_SOURCE`/`PULSE_SINK`, `pin_process_streams`).
-If the Windows branch starts by writing WASAPI code alongside this, the two
-platforms will diverge messily and the branch will never merge cleanly.
+`backends/base.py` now defines `RoutingBackend` as a `typing.Protocol` —
+structural, so a Windows backend satisfies it without importing anything
+Linux-specific — and `backends/pipewire.py` is the only implementation.
+`engine.py` no longer reaches into PipeWire: device targeting goes through
+`resolve_stream_devices()` before the stream opens and `pin_stream()` after.
+Each method's docstring records what the Windows equivalent is expected to be,
+including the two places the platforms are expected to diverge (`pin_stream` a
+likely no-op, `retarget_playback` a real device switch).
 
-Do this small refactor on `main` first: a `RoutingBackend` protocol
-(`enable() → real sink`, `disable()`, `check() → event`, `monitor_source`),
-with `PipeWireBackend` as the only implementation. Then the Windows branch adds
-one file instead of forking three.
+Windows is therefore one new file, not a fork of three. Two leaks remain —
+see D3.2.
 
-### D3. Windows routing backend — the actual unblock
+### D3. Windows support — phased
 
-WASAPI loopback capture (`sounddevice` already supports it) + default-device
-switching via `pycaw` (MIT). Days, not hours. Scope it as its own task.
-Everything already written in `packaging/windows/` is downstream of this.
+The blocker was never the installer. `packaging/windows/` has existed since
+2026-08-13 (Inno Setup script, `build_windows.bat`, a verified multi-res
+`.ico`, a drafted permission email) and **none of it has ever been compiled or
+run**. What is missing sits underneath it: there is no Windows routing backend,
+so a perfectly-built installer installs an app that cannot work.
 
-### D4. Windows licensing decision — close it out
+**Two corrections to what this section used to say**, both found 2026-08-20:
 
-VB-Audio's terms require a distribution agreement above personal-use volume
-(>10 units), and silently automating the install doesn't change that. Either
-send the drafted `vb-audio-permission-email.md`, or decide to ship the
-"prompt the user to install VB-CABLE themselves" fallback permanently and stop
-treating it as open. Also: pin Inno Setup to **6.4.3** (6.5.0+ added a paid
+- *"WASAPI loopback capture (`sounddevice` already supports it)"* — it does
+  not. Installed sounddevice 0.5.5 exposes
+  `WasapiSettings(exclusive, auto_convert, explicit_sample_format)`; there is
+  no loopback flag, so loopback is not reachable through its documented API.
+  This blocks nothing, because the virtual-cable design never needs it, but
+  nobody should plan around a capability that is not there.
+- **Loopback is a tap, not an insert.** Even if it were exposed, capturing the
+  real device's loopback leaves the original audio still playing — the
+  processed signal would be *added* on top rather than substituted for it, and
+  this app exists to remove music *before* it reaches the speaker. So a virtual
+  output device is architecturally required for v1. The only insert-capable
+  alternative on Windows is an APO, which is the C++ port (ARCHITECTURE
+  Phase 3/4), not a near-term option. This validates the VB-CABLE design rather
+  than working around it.
+
+#### D3.1 Rebase the packaging branch forward — hours
+
+`feature/windows-packaging` is ~25 commits behind; `git diff main..` shows it
+deleting `backends/`, `bench_quality.py` and this document, which is staleness,
+not intent. **Do not merge it.** Cherry-pick the additive paths onto a fresh
+branch off `main`: `packaging/windows/*`,
+`packaging/icons/music-assassin-live.ico`, `scripts/build_windows.bat`. Add
+`packaging/windows/vendor/*.exe` to `.gitignore` — that rule exists only on
+the stale branch, and it is what keeps VB-Audio's binary out of git. Fix the
+header comments in the `.iss` and `.bat` that still describe `routing.py` as
+PipeWire-only; D2 ended that.
+
+#### D3.2 Close the two remaining seam gaps — hours, on `main`
+
+- `list_sinks()` and `SINK_NAME` are imported by `ui/app.py:39` straight out of
+  `routing.py` as PipeWire internals. They are *not* on the `RoutingBackend`
+  protocol, and the output-device picker depends on them. Promote them to the
+  backend surface; keep the module-level re-export as an alias so tests do not
+  churn.
+- `paths.py:12` hardcodes `/usr/share/...`, and data/state/config are XDG-only,
+  so on Windows they land in `C:\Users\<name>\.local\state\...` —
+  functional, unidiomatic. Models are unaffected (the installer sets
+  `MUSIC_ASSASSIN_MODELS`, which `models_dir()` checks first), so this is only
+  about state and config. Decide `%LOCALAPPDATA%` or decide to leave it, but
+  decide it while the file is open.
+
+Then make `routing.py` the real platform switch its docstring already sketches.
+
+#### D3.3 Write `WindowsBackend` — days, scope separately
+
+Trap sink becomes **CABLE Input** (render endpoint), capture becomes **CABLE
+Output** — a real capture endpoint, so an ordinary input stream and no
+loopback anywhere.
+
+| Protocol method | Windows mechanism |
+|---|---|
+| `enable()` | save the current default render endpoint, set default → CABLE Input (`pycaw` / `IPolicyConfig`), persist to `ROUTING_STATE` |
+| `disable()` / `recover_stale()` | restore the saved default; recovery reads the same state file |
+| `check()` | poll default endpoint + endpoint list → the same four events (`trap_lost` = CABLE removed or disabled) |
+| `monitor_source` | `"CABLE Output"` |
+| `resolve_stream_devices()` | match PortAudio indices by name + WASAPI host API |
+| `pin_stream()` | no-op returning `True` — `base.py` already anticipates this |
+| `retarget_playback()` | a real device switch; may return `False`, which `base.py` explicitly permits (engine falls back to stop/start) |
+| `sync_volume()` / `adopt_volume()` | mirror CABLE Input's level onto the real endpoint via `IAudioEndpointVolume`. Needed exactly as on Linux: the volume keys act on the default device, which is now the trap |
+| `diagnose_capture()` | feedback-loop check — are we capturing a loopback of what we render into |
+
+New dependency: `pycaw` (MIT) + `comtypes`, gated
+`pycaw; sys_platform == "win32"`.
+
+#### D3.4 Getting VB-CABLE onto the machine
+
+Manual install is ~7 steps and about three minutes, and two of them fail
+silently: the download is a **ZIP, not an installer** (running the `.exe` from
+inside Windows' ZIP preview fails confusingly), and `VBCABLE_Setup_x64.exe`
+must be **run as administrator** or "Install Driver" errors out. A reboot
+follows. Today the `.iss` offers one `MsgBox` and opens the download page,
+which leaves every one of those steps to the user.
+
+**Do it for them instead — fetch, verify, extract, run.** Inno Setup 6.1+
+provides `CreateDownloadPage()`, which renders a real progress page
+(percentage, bytes, speed) and accepts a **required SHA-256** per file. So on
+the user clicking Yes:
+
+1. download `VBCABLE_Driver_Pack43.zip` from VB-Audio's server, with progress
+2. refuse to continue unless the hash matches the pinned one
+3. extract to `{tmp}`
+4. run `VBCABLE_Setup_x64.exe -i -h` — Setup is already
+   `PrivilegesRequired=admin`, so the child inherits elevation and the
+   run-as-administrator trap disappears
+
+That removes five of the seven steps and both silent-failure points. What
+survives is the OS driver-signature prompt (not suppressible, and should not
+be) and the reboot.
+
+**This is legally better than bundling, not worse.** The bytes travel from
+VB-Audio's own server to the user's own machine; our published artifact
+contains none of their binary, so nothing is being redistributed and D4's
+>10-unit threshold is never engaged.
+
+Three things it must handle, none of them optional:
+
+- **Pin the hash.** Downloading and then running an unverified binary *as
+  administrator* is a real vulnerability, not a rough edge. The SHA-256 is a
+  parameter of the download API — use it.
+- **Expect the URL to rotate.** `Pack43` becomes `Pack44` eventually. On any
+  download or hash failure, fall back to the manual path rather than dying.
+- **Offline installs exist.** Same fallback.
+
+So the manual walkthrough stays, as the fallback rather than the default: a
+wizard page listing the steps, naming those two failure points and the reboot,
+with a **Check again** button re-running the existing `VBCableAppearsInstalled`
+registry heuristic so the user can install without restarting Setup. The app
+repeats the same check at first toggle, since anyone who skipped it during
+install arrives there instead.
+
+Unverified here — the D3.5 CI job is what settles both: the exact
+download-page API shape, and how to extract a ZIP from Pascal Script
+(`Extract7ZipArchive` if 6.4.3 exposes it, otherwise the
+`Shell.Application`/`CopyHere` idiom or `Expand-Archive`).
+
+**Rejected: shipping VB-CABLE's installer alongside ours inside a ZIP.** The
+container does not change the analysis — their binary inside our published
+artifact is redistribution whether it is embedded in the installer or sitting
+next to it. Same licensing exposure as D4's bundled variant, worse UX than
+either alternative.
+
+#### D3.5 Build and CI — both, decided 2026-08-20
+
+- GitHub Actions `windows-latest`, job A: build the exe, compile the installer,
+  upload the artifact. This is what will find the two `.iss` bugs the Windows
+  handover predicts — the `SendMessageTimeoutA` extern declaration and the
+  `ShellExecAsOriginalUser` call signature, both hand-written and never
+  exercised.
+- Job B: the hardware-free suite on Windows. Expect a subset at first —
+  `test_routing_events`, `test_capture_diagnosis`, `test_volume_mirror` and
+  `test_retarget_live` are PipeWire-specific and need platform gating or
+  Windows equivalents; `test_engine_recovery`, `test_stereo_rebuild` and
+  `test_status_line` should port as they are.
+- A real Windows machine for what CI structurally cannot do: enable/disable,
+  another app stealing the default device, unplugging headphones mid-playback,
+  the volume keys, crash recovery.
+
+Also decide `--onedir` over `--onefile` for Windows: unsigned onefile binaries
+draw SmartScreen warnings and re-extract to `%TEMP%` on every launch. Code
+signing is a separate cost decision, not a blocker.
+
+### D4. Windows licensing — settled 2026-08-20
+
+**Two variants, one build script.**
+
+- **The public build ships unbundled**, with the D3.4 walkthrough. No
+  redistribution, so no VB-Audio agreement is required and the shipped artifact
+  stays open — which is what ARCHITECTURE §6's open-source-only rule actually
+  asks for.
+- **A separately-named bundled build** exists for convenience. The `.iss`
+  already supports this via `BundleVBCable`, and `build_windows.bat` already
+  flips on the presence of `packaging/windows/vendor/VBCABLE_Setup_x64.exe`.
+  Make it an explicit flag with a distinct output name rather than an implicit
+  side effect of a file being present.
+
+**The caveat that must not get lost:** naming the bundled build "dev" does not
+change its legal character. Published to a public Releases page it is
+redistribution, past VB-Audio's stated >10-unit threshold, whatever the
+filename says. Keep it to internal/personal use unless and until
+`vb-audio-permission-email.md` is sent and answered. The `.gitignore` rule in
+D3.1 keeps their binary out of the repository either way.
+
+Unchanged from before: pin Inno Setup to **6.4.3** (6.5.0+ added a paid
 commercial tier). Synchronous Audio Router was investigated and rejected — see
-the Windows handover, don't redo it.
+`packaging/windows/HANDOVER.md`, don't redo it.
 
 ### D5. Remaining Linux packaging
 
