@@ -1,0 +1,99 @@
+name: windows build
+
+# Proves the Windows packaging COMPILES. It does not prove the app works on
+# Windows -- there is no Windows audio backend yet, so the exe this produces
+# refuses to start and says so (assassin_live/audio/routing.py's
+# unsupported_reason()). That refusal is asserted below, on a real Windows
+# runner, because "it fails cleanly" is a claim worth testing rather than
+# assuming.
+#
+# This exists because packaging/windows/ sat unbuilt from 2026-08-13 and
+# nobody could say whether the .iss even parsed. PyInstaller does not
+# cross-compile and the project has no Windows machine, so CI is the only
+# place this can be answered.
+#
+# A RED RUN HERE IS INFORMATION, NOT A REGRESSION. The .iss has never been
+# through ISCC.exe; its two hand-written Pascal Script calls
+# (SendMessageTimeoutA, ShellExecAsOriginalUser) are the likely first
+# failures. Read the log, fix the script, re-run.
+
+on:
+  push:
+    paths:
+      - 'assassin_live/**'
+      - 'packaging/windows/**'
+      - 'packaging/icons/*.ico'
+      - 'scripts/build_windows.bat'
+      - '.github/workflows/windows-build.yml'
+  pull_request:
+    paths:
+      - 'assassin_live/**'
+      - 'packaging/windows/**'
+      - 'packaging/icons/*.ico'
+      - 'scripts/build_windows.bat'
+      - '.github/workflows/windows-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # scripts/build_windows.bat expects a .venv, the same as the Linux
+      # build expects one -- keeping CI on the developer entry point rather
+      # than a parallel set of commands, so the two cannot drift.
+      - name: Create venv and install dependencies
+        shell: cmd
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip
+          .venv\Scripts\pip.exe install -r requirements.txt pyinstaller
+
+      # The app must refuse to run here, cleanly. If this step ever passes
+      # silently on Windows it means the guard stopped working and a user
+      # would get a FileNotFoundError traceback on 'pw-dump' instead.
+      - name: Assert the app refuses to run on Windows, and says why
+        shell: cmd
+        run: |
+          .venv\Scripts\python.exe tests\test_platform_guard.py || exit /b 1
+          .venv\Scripts\python.exe -m assassin_live --headless && (
+            echo ERROR: the app did not refuse to start on Windows >&2
+            exit /b 1
+          ) || echo OK: refused to start, as intended
+
+      # 6.4.3 specifically: 6.5.0+ added a paid commercial-license tier, so
+      # this is the last version unambiguously free for this project.
+      - name: Install Inno Setup 6.4.3
+        shell: cmd
+        run: choco install innosetup --version=6.4.3 -y --no-progress
+
+      # No .onnx weights in the repo (release assets), hence ALLOW_NO_MODELS.
+      # Enough to compile; deliberately not enough to ship.
+      - name: Build exe and compile installer
+        shell: cmd
+        env:
+          ALLOW_NO_MODELS: "1"
+        run: scripts\build_windows.bat
+
+      - name: Show what was produced
+        if: always()
+        shell: cmd
+        run: |
+          dir dist 2>nul
+          dir build\pyinstaller\dist 2>nul
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: windows-unsigned-compile-check
+          path: |
+            dist/*.exe
+            build/pyinstaller/dist/*.exe
+          if-no-files-found: error
+          retention-days: 14

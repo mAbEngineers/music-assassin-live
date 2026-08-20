@@ -12,7 +12,9 @@ persisted to a state file *before* the swap; recover_stale() runs at startup.
 
 import json
 import re
+import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 
@@ -29,6 +31,41 @@ class SinkInfo:
     description: str = ""
 
 
+# The command-line tools this module drives. All three ship with PipeWire /
+# WirePlumber; none of them exists on Windows or macOS.
+REQUIRED_TOOLS = ("pw-dump", "pw-cli", "wpctl")
+
+
+def unsupported_reason() -> str | None:
+    """Why this machine cannot route audio, or None when it can.
+
+    Called once at startup, before anything touches the graph. It exists
+    because the failure it replaces was a bare FileNotFoundError traceback
+    on 'pw-dump' -- accurate, and useless to anyone who just double-clicked
+    an icon. The string it returns is shown to the user as-is, so it says
+    what is wrong and what can be done about it.
+    """
+    if not sys.platform.startswith("linux"):
+        return (
+            "Music Assassin Live does not support this platform yet.\n\n"
+            "It routes audio through PipeWire, which is Linux-only. A "
+            "Windows version needs a different audio backend (WASAPI plus a "
+            "virtual output device) and that work has not been done, so "
+            f"there is nothing here that would work on {sys.platform}.\n\n"
+            "Windows packaging exists in this repository, but it builds an "
+            "app that cannot route audio -- see packaging/windows/README.md."
+        )
+    missing = [t for t in REQUIRED_TOOLS if shutil.which(t) is None]
+    if missing:
+        return (
+            "PipeWire does not appear to be installed.\n\n"
+            "These commands are required and were not found: "
+            f"{', '.join(missing)}.\n\n"
+            "On Debian/Ubuntu: sudo apt install pipewire wireplumber"
+        )
+    return None
+
+
 def _run(cmd: list[str]) -> str:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
 
@@ -38,7 +75,11 @@ def _pw_dump(type_suffix: str) -> list[dict]:
     # mid-dump it appends further arrays, so parse them all.
     try:
         text = _run(["pw-dump"])
-    except subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
+        # OSError matters as much as SubprocessError: a *missing* pw-dump
+        # raises FileNotFoundError, which is an OSError, so catching only
+        # SubprocessError let it escape and crash startup on any machine
+        # without PipeWire installed.
         return []
     objs, dec, pos = [], json.JSONDecoder(), 0
     while pos < len(text):

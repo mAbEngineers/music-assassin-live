@@ -101,10 +101,26 @@ call :stage_model dpdfnet2_48khz_hr.onnx dpdfnet2_48khz_hr.json Apache-2.0-dpdfn
 call :stage_dtln
 
 if "%BUNDLED_ANY%"=="0" (
-    echo error: no redistributable models found in %MODEL_SOURCE_DIR% >&2
-    echo        run scripts\import_models.py --source ..\Music-Assassin\models first, >&2
-    echo        or pass a source dir: scripts\build_windows.bat C:\path\to\models >&2
-    exit /b 1
+    if "%ALLOW_NO_MODELS%"=="1" (
+        REM CI compile-check mode. The .onnx weights are release assets and are
+        REM not in the repository, so a CI runner has none to stage. Building
+        REM without them still proves the exe links and the .iss compiles,
+        REM which is the only thing CI can prove. It does NOT produce a
+        REM shippable installer -- the stub file below is what tells anyone
+        REM who installs one by mistake why it cannot process audio.
+        echo warning: no models staged -- ALLOW_NO_MODELS=1 is set, so this is a
+        echo          compile check only. The installer it produces is NOT shippable.
+        > "%STAGE%\models\NO-MODELS-IN-THIS-BUILD.txt" echo This build carries no model weights and cannot process audio. It exists to prove the build compiles. See packaging/windows/README.md.
+        REM model-licenses is staged per-model, so it is empty here too, and an
+        REM empty directory is not reliably covered by skipifsourcedoesntexist.
+        > "%STAGE%\model-licenses\NO-MODELS-IN-THIS-BUILD.txt" echo No models were bundled, so no model licenses apply to this build.
+    ) else (
+        echo error: no redistributable models found in %MODEL_SOURCE_DIR% >&2
+        echo        run scripts\import_models.py --source ..\Music-Assassin\models first, >&2
+        echo        or pass a source dir: scripts\build_windows.bat C:\path\to\models >&2
+        echo        ^(CI only: set ALLOW_NO_MODELS=1 for a compile check^) >&2
+        exit /b 1
+    )
 )
 
 set "VBCABLE_ARG="
