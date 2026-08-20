@@ -60,12 +60,20 @@ jobs:
       # would get a FileNotFoundError traceback on 'pw-dump' instead.
       - name: Assert the app refuses to run on Windows, and says why
         shell: cmd
+        # Explicit errorlevel checks rather than &&/||: a non-zero exit is
+        # the SUCCESS condition here, and cmd's operator chaining leaks the
+        # original errorlevel through a trailing `|| echo`, failing the step
+        # for doing exactly what it was asked to do.
         run: |
-          .venv\Scripts\python.exe tests\test_platform_guard.py || exit /b 1
-          .venv\Scripts\python.exe -m assassin_live --headless && (
-            echo ERROR: the app did not refuse to start on Windows >&2
-            exit /b 1
-          ) || echo OK: refused to start, as intended
+          .venv\Scripts\python.exe tests\test_platform_guard.py
+          if errorlevel 1 exit /b 1
+          .venv\Scripts\python.exe -m assassin_live --headless
+          if errorlevel 1 (
+            echo OK: refused to start on Windows, as intended
+            exit /b 0
+          )
+          echo ERROR: the app started on Windows instead of refusing >&2
+          exit /b 1
 
       # 6.4.3 specifically: 6.5.0+ added a paid commercial-license tier, so
       # this is the last version unambiguously free for this project.
@@ -87,6 +95,7 @@ jobs:
         run: |
           dir dist 2>nul
           dir build\pyinstaller\dist 2>nul
+          exit /b 0
 
       - uses: actions/upload-artifact@v4
         if: success()
