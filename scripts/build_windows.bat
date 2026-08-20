@@ -57,7 +57,23 @@ if not exist "%VENV%\Scripts\python.exe" (
     exit /b 1
 )
 
-for /f "delims=" %%v in ('"%VENV%\Scripts\python.exe" -c "import re,pathlib;print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('assassin_live/__init__.py').read_text()).group(1))"') do set "VERSION=%%v"
+REM Read __version__ without a for/f loop. cmd's for/f mangles a command
+REM containing both parentheses and nested quotes -- the previous one-liner
+REM died with "VERSION was unexpected at this time" the first time this
+REM script was ever run. chr(34) keeps a double quote off the command line
+REM entirely, and the temp file avoids for/f altogether.
+set "VERFILE=%TEMP%\music-assassin-version.txt"
+"%VENV%\Scripts\python.exe" -c "import pathlib;print([l.split('=')[1].strip().strip(chr(34)) for l in pathlib.Path('assassin_live/__init__.py').read_text().splitlines() if l.startswith('__version__')][0])" > "%VERFILE%"
+if errorlevel 1 (
+    echo error: could not read __version__ from assassin_live\__init__.py >&2
+    exit /b 1
+)
+set /p VERSION=<"%VERFILE%"
+del "%VERFILE%" >nul 2>nul
+if not defined VERSION (
+    echo error: __version__ came back empty >&2
+    exit /b 1
+)
 echo ==^> building %PKG% %VERSION% (windows)
 
 "%VENV%\Scripts\python.exe" -c "import PyInstaller" 2>nul
