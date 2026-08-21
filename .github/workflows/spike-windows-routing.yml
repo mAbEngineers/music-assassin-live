@@ -1,0 +1,40 @@
+name: spike windows routing
+
+# Answers one question before D3.3 gets scoped: can Python drive
+# IPolicyConfig, the undocumented COM interface that is the only way to set
+# the Windows default audio endpoint? Everything else in a Windows routing
+# backend is ordinary work; this is the piece with no public API and no
+# compatibility guarantee, so it is worth an hour before it is worth a week.
+#
+# A runner has no audio endpoints, so it cannot exercise the actual switch --
+# but it can answer whether the interface exists and instantiates, which is
+# the half that would invalidate the design.
+#
+# Throwaway. Delete this workflow and the branch once the question is closed.
+
+on:
+  push:
+    branches: [spike/windows-routing]
+  workflow_dispatch:
+
+jobs:
+  spike:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install probes
+        shell: cmd
+        run: |
+          python -m pip install --upgrade pip
+          pip install sounddevice pycaw comtypes
+
+      # Never fails the job: this reports findings, it does not assert them.
+      - name: Probe
+        shell: cmd
+        run: |
+          python scripts\spike_d3_windows_routing.py
+          exit /b 0
