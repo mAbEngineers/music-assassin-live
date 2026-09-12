@@ -232,6 +232,36 @@ def probe_switch(working, devices):
             note(f"SetDefaultEndpoint({role_name})", f"FAILED: {e}")
 
 
+class _Tee:
+    """Mirror everything printed into a buffer as well as the console.
+
+    This runs as a double-clicked .exe on someone else's machine, so the
+    console is where the findings appear and the report file is how they get
+    back here. Writing both from one place means they cannot disagree.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.lines = []
+
+    def write(self, s):
+        self.lines.append(s)
+        self._stream.write(s)
+
+    def flush(self):
+        self._stream.flush()
+
+
+def _report_path():
+    """Next to the .exe when frozen, else next to this script."""
+    import pathlib
+    if getattr(sys, "frozen", False):
+        base = pathlib.Path(sys.executable).parent
+    else:
+        base = pathlib.Path(__file__).resolve().parent
+    return base / "spike-windows-routing-report.txt"
+
+
 def main():
     print(__doc__.split("Run:")[0].strip())
     if not probe_platform():
@@ -253,8 +283,29 @@ def main():
 
 
 if __name__ == "__main__":
+    tee = _Tee(sys.stdout)
+    sys.stdout = tee
+    code = 0
     try:
-        sys.exit(main())
+        code = main()
     except Exception:
-        traceback.print_exc()
-        sys.exit(1)
+        traceback.print_exc(file=tee)
+        code = 1
+    finally:
+        sys.stdout = tee._stream
+        try:
+            path = _report_path()
+            path.write_text("".join(tee.lines), encoding="utf-8")
+            print(f"\n  Report written to: {path}")
+            print("  Send that file back -- it is the whole result.")
+        except Exception as e:
+            print(f"\n  (could not write report file: {e})")
+        # A double-clicked console window closes the instant the process
+        # ends, taking the findings with it. Only pause when a human is
+        # actually watching; CI must never block here.
+        if sys.stdin is not None and sys.stdin.isatty():
+            try:
+                input("\n  Press Enter to close...")
+            except Exception:
+                pass
+    sys.exit(code)

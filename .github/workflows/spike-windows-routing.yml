@@ -33,8 +33,32 @@ jobs:
           pip install sounddevice pycaw comtypes
 
       # Never fails the job: this reports findings, it does not assert them.
-      - name: Probe
+      - name: Probe (on the runner, which has no audio endpoints)
         shell: cmd
         run: |
           python scripts\spike_d3_windows_routing.py
           exit /b 0
+
+      # The runner cannot answer the question that matters -- it has no audio
+      # devices -- so the probe has to go to a machine that does. Shipping it
+      # as a standalone .exe means the person running it needs no Python, no
+      # pip, and no checkout: download, double-click, send back the report.
+      - name: Package the probe as a standalone exe
+        shell: cmd
+        run: |
+          pip install pyinstaller
+          pyinstaller --onefile --console ^
+            --name spike-windows-routing ^
+            --collect-all pycaw ^
+            --collect-all comtypes ^
+            --hidden-import sounddevice ^
+            scripts\spike_d3_windows_routing.py
+          if errorlevel 1 exit /b 1
+          dir dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spike-windows-routing-exe
+          path: dist/spike-windows-routing.exe
+          if-no-files-found: error
+          retention-days: 90
