@@ -51,7 +51,8 @@ jobs:
             --name spike-windows-routing ^
             --collect-all pycaw ^
             --collect-all comtypes ^
-            --hidden-import sounddevice ^
+            --collect-all sounddevice ^
+            --collect-all _sounddevice_data ^
             scripts\spike_d3_windows_routing.py
           if errorlevel 1 exit /b 1
           dir dist
