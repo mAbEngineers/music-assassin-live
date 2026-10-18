@@ -205,6 +205,29 @@ def probe_policy_config():
     return working
 
 
+def endpoint_id(dev):
+    """Read an endpoint's string id, whatever pycaw handed us.
+
+    GetSpeakers() has returned two different things across pycaw versions: a
+    raw IMMDevice, whose id comes from GetId(), and an AudioDevice wrapper,
+    whose id is a plain .id attribute. Assuming the first one is what made
+    the first real-hardware run skip the only test that mattered, so try
+    both rather than pick one.
+    """
+    for name in ("id", "GetId"):
+        try:
+            v = getattr(dev, name)
+        except Exception:
+            continue
+        try:
+            v = v() if callable(v) else v
+        except Exception:
+            continue
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
 def probe_switch(working, devices):
     """Only meaningful where a real endpoint exists."""
     section("actually switching the default endpoint")
@@ -214,22 +237,84 @@ def probe_switch(working, devices):
     try:
         from pycaw.pycaw import AudioUtilities
         spk = AudioUtilities.GetSpeakers()
-        dev_id = spk.GetId()
     except Exception as e:
-        note("skipped", f"no default endpoint to test with ({e})")
+        note("skipped", f"no default render endpoint on this machine ({e})")
         print("  A runner with no audio hardware cannot exercise this.")
         print("  Re-run on a real Windows desktop to close the question.")
         return
 
+    dev_id = endpoint_id(spk)
+    if not dev_id:
+        note("skipped", f"could not read the endpoint id off {type(spk).__name__}")
+        print(f"  attributes seen: {sorted(a for a in dir(spk) if not a.startswith('_'))[:14]}")
+        print("  This is a bug in THIS script, not a limitation of the")
+        print("  platform -- the endpoint exists and was found.")
+        return
+    note("default endpoint id", dev_id)
+
     label, clsid, iid, obj = working
-    # Setting the CURRENT default as the default again: a real call through
-    # the real vtable, with no user-visible consequence if it succeeds.
+    # Setting the CURRENT default as the default again: a real call down the
+    # real vtable, which is the thing in doubt, with no user-visible
+    # consequence when it works. If the ten placeholder methods have put
+    # SetDefaultEndpoint at the wrong offset, this is where that shows.
+    ok_roles = []
     for role, role_name in ((0, "eConsole"), (1, "eMultimedia"), (2, "eCommunications")):
         try:
             obj.SetDefaultEndpoint(dev_id, role)
             note(f"SetDefaultEndpoint({role_name})", "SUCCEEDED (no-op self-set)")
+            ok_roles.append(role)
         except Exception as e:
             note(f"SetDefaultEndpoint({role_name})", f"FAILED: {e}")
+
+    if not ok_roles:
+        print("\n  >>> The call does not work. Either the vtable offset is")
+        print("  >>> wrong or the interface is not what we declared.")
+        print("  >>> A Windows backend needs another way to switch devices.")
+        return
+
+    # The self-set proves the call is reachable. It cannot prove the switch
+    # has an EFFECT, since nothing changes. Moving the default to a different
+    # endpoint and back is the only thing that does -- so it is offered, not
+    # assumed, and it always puts the original back.
+    if "--switch" not in sys.argv:
+        print("\n  Self-set works, which proves the call is wired correctly.")
+        print("  To also prove it CHANGES the default, re-run as:")
+        print("      spike-windows-routing.exe --switch")
+        print("  That moves your default output to another device and then")
+        print("  restores it. Sound will come out of somewhere else for")
+        print("  about a second.")
+        return
+
+    section("real switch (will be restored)")
+    try:
+        from pycaw.pycaw import AudioUtilities
+        others = []
+        for d in AudioUtilities.GetAllDevices():
+            did = endpoint_id(d)
+            if did and did != dev_id:
+                others.append((did, str(d)))
+        if not others:
+            note("skipped", "no second endpoint to switch to")
+            return
+        target_id, target_name = others[0]
+        note("switching to", target_name[:58])
+        obj.SetDefaultEndpoint(target_id, 0)
+
+        moved = endpoint_id(AudioUtilities.GetSpeakers())
+        if moved == target_id:
+            note("verified", "the default DID move -- switching works")
+        else:
+            note("verified", f"default is now {moved!r}, expected {target_id!r}")
+    except Exception as e:
+        note("switch", f"FAILED: {e}")
+    finally:
+        # Unconditional: a spike must not leave someone's audio rerouted.
+        try:
+            obj.SetDefaultEndpoint(dev_id, 0)
+            back = endpoint_id(AudioUtilities.GetSpeakers())
+            note("restored", "yes" if back == dev_id else f"MANUAL FIX NEEDED (now {back!r})")
+        except Exception as e:
+            note("restored", f"FAILED -- set your output device manually ({e})")
 
 
 class _Tee:
