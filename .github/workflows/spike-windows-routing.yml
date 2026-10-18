@@ -57,9 +57,30 @@ jobs:
           if errorlevel 1 exit /b 1
           dir dist
 
+      # Building the exe is not the same as it working. This probe is carried
+      # to a machine with no internet, no Python and no checkout, where a
+      # missing bundled DLL means a dead end rather than a retry -- so prove
+      # the frozen binary launches and resolves its own dependencies here,
+      # where fixing it is cheap. The interactive pause is gated on an
+      # isatty() check, so it cannot block a runner.
+      - name: Run the built exe (prove the bundle resolves)
+        shell: cmd
+        run: |
+          dist\spike-windows-routing.exe
+          if errorlevel 1 (
+            echo ERROR: the packaged exe failed to run >&2
+            exit /b 1
+          )
+          echo OK: packaged exe ran
+          type spike-windows-routing-report.txt 2>nul
+          if exist dist\spike-windows-routing-report.txt type dist\spike-windows-routing-report.txt
+          exit /b 0
+
       - uses: actions/upload-artifact@v4
         with:
           name: spike-windows-routing-exe
-          path: dist/spike-windows-routing.exe
+          path: |
+            dist/spike-windows-routing.exe
+            dist/spike-windows-routing-report.txt
           if-no-files-found: error
           retention-days: 90
