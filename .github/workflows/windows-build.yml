@@ -1,0 +1,146 @@
+name: windows build
+
+# Proves the Windows packaging COMPILES. It does not prove the app works on
+# Windows -- there is no Windows audio backend yet, so the exe this produces
+# refuses to start and says so (assassin_live/audio/routing.py's
+# unsupported_reason()). That refusal is asserted below, on a real Windows
+# runner, because "it fails cleanly" is a claim worth testing rather than
+# assuming.
+#
+# This exists because packaging/windows/ sat unbuilt from 2026-08-13 and
+# nobody could say whether the .iss even parsed. PyInstaller does not
+# cross-compile and the project has no Windows machine, so CI is the only
+# place this can be answered.
+#
+# A RED RUN HERE IS INFORMATION, NOT A REGRESSION. The .iss has never been
+# through ISCC.exe; its two hand-written Pascal Script calls
+# (SendMessageTimeoutA, ShellExecAsOriginalUser) are the likely first
+# failures. Read the log, fix the script, re-run.
+
+on:
+  push:
+    paths:
+      - 'assassin_live/**'
+      - 'packaging/windows/**'
+      - 'packaging/icons/*.ico'
+      - 'scripts/build_windows.bat'
+      - '.github/workflows/windows-build.yml'
+  pull_request:
+    paths:
+      - 'assassin_live/**'
+      - 'packaging/windows/**'
+      - 'packaging/icons/*.ico'
+      - 'scripts/build_windows.bat'
+      - '.github/workflows/windows-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # scripts/build_windows.bat expects a .venv, the same as the Linux
+      # build expects one -- keeping CI on the developer entry point rather
+      # than a parallel set of commands, so the two cannot drift.
+      - name: Create venv and install dependencies
+        shell: cmd
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip
+          .venv\Scripts\pip.exe install -r requirements.txt pyinstaller
+
+      # The app must refuse to run here, cleanly. If this step ever passes
+      # silently on Windows it means the guard stopped working and a user
+      # would get a FileNotFoundError traceback on 'pw-dump' instead.
+      - name: Assert the app refuses to run on Windows, and says why
+        shell: cmd
+        # Explicit errorlevel checks rather than &&/||: a non-zero exit is
+        # the SUCCESS condition here, and cmd's operator chaining leaks the
+        # original errorlevel through a trailing `|| echo`, failing the step
+        # for doing exactly what it was asked to do.
+        run: |
+          .venv\Scripts\python.exe tests\test_platform_guard.py
+          if errorlevel 1 exit /b 1
+          .venv\Scripts\python.exe -m assassin_live --headless
+          if errorlevel 1 (
+            echo OK: refused to start on Windows, as intended
+            exit /b 0
+          )
+          echo ERROR: the app started on Windows instead of refusing >&2
+          exit /b 1
+
+      # 6.4.3 specifically: 6.5.0+ added a paid commercial-license tier, so
+      # this is the last version unambiguously free for this project.
+      #
+      # The downgrade flags are load-bearing, not defensive. windows-latest
+      # ships a newer Inno Setup preinstalled (6.7.1 as of 2026-08-20), which
+      # is on the wrong side of that licensing line, and choco refuses to
+      # replace a newer package without being told to.
+      # Not chocolatey: it carries only recent versions and 6.4.3 is long
+      # gone from it. Not files.jrsoftware.org either -- as of March 2026 that
+      # host keeps only .issig signatures and points at GitHub for the
+      # binaries. The GitHub release asset is immutable, which is what makes
+      # the hash below worth pinning.
+      #
+      # The hash is not ceremony. This step downloads an executable and runs
+      # it as administrator on a machine that then builds our installer; an
+      # unverified binary in that position would be the single most valuable
+      # thing in this pipeline to tamper with.
+      - name: Install Inno Setup 6.4.3
+        shell: pwsh
+        run: |
+          $url  = 'https://github.com/jrsoftware/issrc/releases/download/is-6_4_3/innosetup-6.4.3.exe'
+          $want = 'f3c42116542c4cc57263c5ba6c4feabfc49fe771f2f98a79d2f7628b8762723b'
+          Invoke-WebRequest -Uri $url -OutFile is.exe
+          $got = (Get-FileHash is.exe -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) {
+            Write-Error "Inno Setup hash mismatch`n  expected $want`n  got      $got"
+            exit 1
+          }
+          Write-Host "SHA-256 verified: $got"
+          # /VERYSILENT so it cannot block, and it installs over the runner's
+          # preinstalled newer copy rather than beside it.
+          Start-Process -FilePath .\is.exe -Wait -ArgumentList `
+            '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-'
+          exit 0
+
+      # Proves the pin actually took. Without this, a silently-newer ISCC
+      # would compile the installer fine and nobody would notice the licence
+      # question had been reopened.
+      - name: Show which Inno Setup compiled this
+        shell: cmd
+        run: |
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" /? 2>&1 | findstr /i "Inno Setup"
+          exit /b 0
+
+      # No .onnx weights in the repo (release assets), hence ALLOW_NO_MODELS.
+      # Enough to compile; deliberately not enough to ship.
+      - name: Build exe and compile installer
+        shell: cmd
+        env:
+          ALLOW_NO_MODELS: "1"
+        run: scripts\build_windows.bat
+
+      - name: Show what was produced
+        if: always()
+        shell: cmd
+        run: |
+          dir dist 2>nul
+          dir build\pyinstaller\dist 2>nul
+          exit /b 0
+
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: windows-unsigned-compile-check
+          path: |
+            dist/*.exe
+            build/pyinstaller/dist/*.exe
+          if-no-files-found: error
+          retention-days: 14

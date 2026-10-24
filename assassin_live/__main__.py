@@ -1,10 +1,33 @@
 """python -m assassin_live [--headless --model NAME] [--recover] [--list-models]"""
 
 import argparse
+import sys
 import time
 
 from .paths import models_dir
 from . import processors
+
+
+def _report_unsupported(reason: str, gui: bool) -> None:
+    """Say why we cannot run, through a channel the user can actually see.
+
+    stderr always, because it is scriptable and shows up in journals. Plus a
+    dialog on the GUI path: a --windowed PyInstaller build has no console
+    attached, so a printed message there reaches nobody, which is exactly
+    how "it just doesn't open" bug reports get written.
+    """
+    print(reason, file=sys.stderr)
+    if not gui:
+        return
+    try:
+        import tkinter
+        from tkinter import messagebox
+        root = tkinter.Tk()
+        root.withdraw()
+        messagebox.showerror("Music Assassin Live", reason)
+        root.destroy()
+    except Exception:
+        pass    # no display or no tk: stderr above is the fallback
 
 
 def main():
@@ -27,6 +50,17 @@ def main():
         for n in processors.available(models_dir()):
             print(n)
         return
+
+    # Everything below drives a platform audio graph. Check one is actually
+    # reachable before touching it, so an unsupported platform or a missing
+    # PipeWire produces a sentence instead of a FileNotFoundError traceback
+    # on 'pw-dump'. --list-models above needs none of it, which is why the
+    # guard sits here rather than at the top of main().
+    from .audio.routing import unsupported_reason
+    reason = unsupported_reason()
+    if reason:
+        _report_unsupported(reason, gui=not args.headless and not args.recover)
+        raise SystemExit(2)
 
     if args.recover:
         from .audio.routing import RoutingSession

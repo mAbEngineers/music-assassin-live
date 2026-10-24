@@ -39,6 +39,24 @@ class RoutingBackend(Protocol):
     real: SinkInfo | None       # the current real (non-trap) output device
 
     @staticmethod
+    def unsupported_reason() -> "str | None":
+        """Why this backend cannot run on this machine, or None when it can.
+
+        Checked once at startup, before anything touches the platform's
+        audio graph. It exists because the failure it replaces was a bare
+        FileNotFoundError traceback on 'pw-dump' -- accurate, and useless to
+        anyone who just double-clicked an icon. The string is shown to the
+        user as-is, so it must say what is wrong and what can be done about
+        it.
+
+        Belongs on the backend rather than in one platform-agnostic check
+        because each platform is unavailable for its own reasons: Linux for
+        want of PipeWire, Windows for want of a virtual output device. Like
+        recover_stale(), it must work with no instance constructed.
+        """
+        ...
+
+    @staticmethod
     def recover_stale() -> None:
         """Clean up after a crash: remove any leftover trap device and
         restore whatever was the default before the app last ran. Safe to

@@ -15,12 +15,18 @@ PipeWireBackend as RoutingSession, the name callers actually import.
 
 import json
 import os
+import shutil
 import re
 import subprocess
+import sys
 import time
 
 from ...paths import ROUTING_STATE
 from .base import SinkInfo
+
+# The command-line tools this backend drives. All three ship with
+# PipeWire / WirePlumber; none of them exists on Windows or macOS.
+REQUIRED_TOOLS = ("pw-dump", "pw-cli", "wpctl")
 
 SINK_NAME = "MusicAssassin"
 SINK_DESC = "Music Assassin"
@@ -35,7 +41,11 @@ def _pw_dump(type_suffix: str) -> list[dict]:
     # mid-dump it appends further arrays, so parse them all.
     try:
         text = _run(["pw-dump"])
-    except subprocess.SubprocessError:
+    except (OSError, subprocess.SubprocessError):
+        # OSError matters as much as SubprocessError: a *missing* pw-dump
+        # raises FileNotFoundError, which is an OSError, so catching only
+        # SubprocessError let it escape and crash startup on any machine
+        # with no PipeWire installed.
         return []
     objs, dec, pos = [], json.JSONDecoder(), 0
     while pos < len(text):
@@ -187,6 +197,24 @@ class PipeWireBackend:
         return fallback
 
     # -- crash recovery ----------------------------------------------------
+    @staticmethod
+    def unsupported_reason() -> str | None:
+        """See RoutingBackend.unsupported_reason()."""
+        if not sys.platform.startswith("linux"):
+            return (
+                "The PipeWire backend only runs on Linux, not on "
+                f"{sys.platform}."
+            )
+        missing = [t for t in REQUIRED_TOOLS if shutil.which(t) is None]
+        if missing:
+            return (
+                "PipeWire does not appear to be installed.\n\n"
+                "These commands are required and were not found: "
+                f"{', '.join(missing)}.\n\n"
+                "On Debian/Ubuntu: sudo apt install pipewire wireplumber"
+            )
+        return None
+
     @staticmethod
     def recover_stale() -> None:
         for s in find_sinks_named(SINK_NAME):
